@@ -1,0 +1,18 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}Удалить занятие · Школьное расписание{% endblock %}
+
+{% block content %}
+<section class="panel" style="max-width: 720px; margin: 0 auto;">
+    <h2>Удалить занятие</h2>
+    <p>Удалить <strong>{{ schedule.subject }}</strong> у <strong>{{ schedule.class_obj }}</strong> на дату <strong>{{ schedule.lesson_date }}</strong>?</p>
+    <p class="muted">Это действие удалит занятие из выбранной недели. Закрепление здесь не защищает запись от удаления.</p>
+    <form method="post">
+        {% csrf_token %}
+        <div class="actions">
+            <button type="submit">Подтвердить удаление</button>
+            <a class="button secondary" href="{% url 'scheduler:schedule_edit' schedule.pk %}">Отмена</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

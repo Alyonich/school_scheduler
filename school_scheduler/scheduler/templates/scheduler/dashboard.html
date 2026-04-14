@@ -1,0 +1,88 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}Главная · Школьное расписание{% endblock %}
+
+{% block content %}
+<div class="grid grid-2">
+    <section class="panel">
+        <h2>Обзор проекта</h2>
+        <p class="muted">Краткая сводка по тестовым школьным данным и текущему состоянию расписания.</p>
+        <div class="grid grid-2">
+            <div class="metric">
+                <span class="muted">Классы</span>
+                <strong>{{ summary.classes }}</strong>
+            </div>
+            <div class="metric">
+                <span class="muted">Преподаватели</span>
+                <strong>{{ summary.teachers }}</strong>
+            </div>
+            <div class="metric">
+                <span class="muted">Занятия на этой неделе</span>
+                <strong>{{ summary.lessons_this_week }}</strong>
+            </div>
+            <div class="metric">
+                <span class="muted">Закреплённые занятия</span>
+                <strong>{{ summary.locked_lessons }}</strong>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Автоматически составить расписание</h2>
+        <p class="muted">Система учитывает конфликты, доступность преподавателей, ограничения по предметам и старается не допускать окон между уроками.</p>
+        <form method="post" action="{% url 'scheduler:generate' %}" id="generate-form-dashboard">
+            {% csrf_token %}
+            {% for field in generation_form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.help_text %}<div class="muted">{{ field.help_text }}</div>{% endif %}
+                    {% for error in field.errors %}<div class="message error">{{ error }}</div>{% endfor %}
+                </div>
+            {% endfor %}
+            {% include "scheduler/_workload_editor.html" with workload_rows=workload_rows form_id="generate-form-dashboard" %}
+            <button type="submit">Составить расписание</button>
+        </form>
+    </section>
+</div>
+
+<div class="grid grid-2" style="margin-top: 1rem;">
+    <section class="panel">
+        <h2>Открыть расписание</h2>
+        <p class="muted">Перейдите в недельный редактор и просмотрите расписание класса или преподавателя.</p>
+        <form method="get" action="{% url 'scheduler:timetable' %}">
+            {% for field in filter_form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                </div>
+            {% endfor %}
+            <button type="submit">Открыть недельное расписание</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <h2>Самые загруженные преподаватели</h2>
+        {% if busiest_teachers %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Преподаватель</th>
+                        <th>Всего занятий</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for teacher in busiest_teachers %}
+                        <tr>
+                            <td>{{ teacher }}</td>
+                            <td>{{ teacher.total_lessons }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">Занятий пока нет. Заполните демо-данные и запустите генерацию расписания.</div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

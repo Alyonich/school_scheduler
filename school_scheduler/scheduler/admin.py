@@ -4,6 +4,7 @@ from .models import (
     User,
     Subject,
     ClassSubject,
+    WeeklyClassSubjectLoad,
     Teacher,
     Classroom,
     LessonTime,
@@ -39,9 +40,9 @@ class ScheduleChangeInline(admin.TabularInline):
 
 @admin.register(Class)
 class ClassAdmin(admin.ModelAdmin):
-    list_display = ('name', 'students_count', 'education_level')
+    list_display = ('name', 'grade', 'parallel', 'students_count', 'education_level')
     search_fields = ('name',)
-    list_filter = ('education_level',)
+    list_filter = ('education_level', 'grade')
     inlines = [ClassSubjectInline, TeachingAssignmentInline]
 
 
@@ -55,7 +56,7 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(Subject)
 class SubjectAdmin(admin.ModelAdmin):
-    list_display = ('name', 'required_room_type')
+    list_display = ('name', 'required_room_type', 'max_lessons_per_day')
     search_fields = ('name',)
     list_filter = ('required_room_type',)
 
@@ -67,9 +68,18 @@ class ClassSubjectAdmin(admin.ModelAdmin):
     list_filter = ('class_obj', 'subject')
 
 
+@admin.register(WeeklyClassSubjectLoad)
+class WeeklyClassSubjectLoadAdmin(admin.ModelAdmin):
+    list_display = ('week_start', 'class_subject', 'weekly_hours', 'updated_at')
+    list_filter = ('week_start', 'class_subject__class_obj')
+    search_fields = ('class_subject__class_obj__name', 'class_subject__subject__name')
+    autocomplete_fields = ('class_subject',)
+    readonly_fields = ('updated_at',)
+
+
 @admin.register(Teacher)
 class TeacherAdmin(admin.ModelAdmin):
-    list_display = ('user', 'qualification', 'workload_hours')
+    list_display = ('user', 'qualification', 'workload_hours', 'max_lessons_per_day')
     search_fields = ('user__username', 'user__full_name', 'qualification')
     list_filter = ('qualification',)
     autocomplete_fields = ('user',)
@@ -88,6 +98,7 @@ class LessonTimeAdmin(admin.ModelAdmin):
     list_display = ('lesson_number', 'start_time', 'end_time', 'day_type')
     list_filter = ('day_type',)
     ordering = ('day_type', 'lesson_number')
+    search_fields = ('lesson_number',)
 
 
 @admin.register(TimeSlot)
@@ -95,6 +106,7 @@ class TimeSlotAdmin(admin.ModelAdmin):
     list_display = ('weekday', 'lesson_time')
     list_filter = ('weekday', 'lesson_time__day_type')
     autocomplete_fields = ('lesson_time',)
+    search_fields = ('lesson_time__lesson_number',)
 
 
 @admin.register(TeachingAssignment)
@@ -120,7 +132,7 @@ class TeacherAvailabilityAdmin(admin.ModelAdmin):
 
 @admin.register(Schedule)
 class ScheduleAdmin(admin.ModelAdmin):
-    list_display = ('class_obj', 'subject', 'teacher', 'classroom', 'lesson_date', 'time_slot')
+    list_display = ('class_obj', 'subject', 'teacher', 'classroom', 'lesson_date', 'time_slot', 'is_locked')
     search_fields = (
         'class_obj__name',
         'subject__name',
@@ -128,7 +140,7 @@ class ScheduleAdmin(admin.ModelAdmin):
         'teacher__user__full_name',
         'classroom__name',
     )
-    list_filter = ('lesson_date', 'subject', 'class_obj')
+    list_filter = ('lesson_date', 'subject', 'class_obj', 'is_locked')
     autocomplete_fields = ('class_obj', 'subject', 'teacher', 'classroom', 'time_slot')
     inlines = [ScheduleChangeInline]
 

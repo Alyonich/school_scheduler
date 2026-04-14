@@ -1,0 +1,28 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}{{ title }} · Школьное расписание{% endblock %}
+
+{% block content %}
+<section class="panel" style="max-width: 760px; margin: 0 auto;">
+    <h2>{{ title }}</h2>
+    <p class="muted">Используйте эту форму, чтобы скорректировать сгенерированное расписание или добавить ручное занятие.</p>
+    <form method="post">
+        {% csrf_token %}
+        {% for field in form %}
+            <div class="field">
+                <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<div class="muted">{{ field.help_text }}</div>{% endif %}
+                {% for error in field.errors %}<div class="message error">{{ error }}</div>{% endfor %}
+            </div>
+        {% endfor %}
+        <div class="actions">
+            <button type="submit">Сохранить занятие</button>
+            {% if schedule %}
+                <a class="button secondary" href="{% url 'scheduler:schedule_delete' schedule.pk %}">Удалить занятие</a>
+            {% endif %}
+            <a class="button secondary" href="{% url 'scheduler:timetable' %}">Назад к расписанию</a>
+        </div>
+    </form>
+</section>
+{% endblock %}

@@ -46,6 +46,8 @@ class ScheduleChangeType(models.TextChoices):
 class Class(models.Model):
     name = models.CharField(max_length=10, unique=True)
     students_count = models.PositiveIntegerField()
+    grade = models.PositiveSmallIntegerField(default=1)
+    parallel = models.CharField(max_length=2, default='A')
     education_level = models.CharField(
         max_length=20,
         choices=EducationLevel.choices
@@ -64,6 +66,12 @@ class Class(models.Model):
         verbose_name = 'класс'
         verbose_name_plural = 'классы'
         ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['grade', 'parallel'],
+                name='unique_grade_parallel'
+            )
+        ]
 
 
 class User(AbstractUser):
@@ -77,7 +85,8 @@ class User(AbstractUser):
     )
     role = models.CharField(
         max_length=20,
-        choices=UserRole.choices
+        choices=UserRole.choices,
+        default=UserRole.STUDENT
     )
     full_name = models.CharField(max_length=100, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -93,6 +102,7 @@ class User(AbstractUser):
 
 class Subject(models.Model):
     name = models.CharField(max_length=100, unique=True)
+    max_lessons_per_day = models.PositiveSmallIntegerField(default=2)
     required_room_type = models.CharField(
         max_length=50,
         choices=RoomType.choices,
@@ -139,6 +149,41 @@ class ClassSubject(models.Model):
         ]
 
 
+class WeeklyClassSubjectLoad(models.Model):
+    week_start = models.DateField(db_index=True, verbose_name='начало недели')
+    class_subject = models.ForeignKey(
+        ClassSubject,
+        on_delete=models.CASCADE,
+        related_name='weekly_loads',
+        verbose_name='класс-предмет'
+    )
+    weekly_hours = models.PositiveSmallIntegerField(verbose_name='часов в неделю')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        errors = {}
+        if self.week_start and self.week_start.weekday() != 0:
+            errors['week_start'] = 'Дата начала недели должна быть понедельником.'
+        if self.weekly_hours > 40:
+            errors['weekly_hours'] = 'Слишком большая нагрузка: укажите значение до 40 часов в неделю.'
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self):
+        return f'{self.week_start} / {self.class_subject} / {self.weekly_hours} ч'
+
+    class Meta:
+        verbose_name = 'недельная нагрузка класса по предмету'
+        verbose_name_plural = 'недельные нагрузки классов по предметам'
+        ordering = ['-week_start', 'class_subject__class_obj__name', 'class_subject__subject__name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['week_start', 'class_subject'],
+                name='unique_week_start_class_subject_load'
+            )
+        ]
+
+
 class Teacher(models.Model):
     user = models.OneToOneField(
         User,
@@ -149,6 +194,7 @@ class Teacher(models.Model):
     workload_hours = models.PositiveIntegerField(
         verbose_name='максимальная нагрузка в неделю'
     )
+    max_lessons_per_day = models.PositiveSmallIntegerField(default=5)
 
     def clean(self):
         if self.user and self.user.role != UserRole.TEACHER:
@@ -389,6 +435,8 @@ class Schedule(models.Model):
         related_name='schedules'
     )
     lesson_date = models.DateField()
+    is_locked = models.BooleanField(default=False)
+    note = models.CharField(max_length=255, blank=True)
 
     def clean(self):
         errors = {}
@@ -423,6 +471,10 @@ class Schedule(models.Model):
 
         if availability and not availability.is_available:
             errors['time_slot'] = 'Преподаватель недоступен в данный временной слот.'
+
+        if self.lesson_date and self.time_slot_id:
+            if self.lesson_date.isoweekday() != self.time_slot.weekday:
+                errors['lesson_date'] = 'Дата урока должна совпадать с днем недели выбранного слота.'
 
         if errors:
             raise ValidationError(errors)

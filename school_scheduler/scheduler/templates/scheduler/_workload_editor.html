@@ -1,0 +1,72 @@
+<div class="field">
+    <label>Недельная нагрузка по предметам</label>
+    <div class="muted">Укажите, сколько уроков каждого предмета нужно поставить на выбранную неделю. Например: «7А · Литература = 3».</div>
+    {% if workload_rows %}
+        <div class="table-wrap">
+            <table class="workload-table">
+                <thead>
+                    <tr>
+                        <th>Класс</th>
+                        <th>Предмет</th>
+                        <th>База</th>
+                        <th>Часов на неделю</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in workload_rows %}
+                        <tr data-workload-row data-class-id="{{ row.class_id }}">
+                            <td>{{ row.class_name }}</td>
+                            <td>{{ row.subject_name }}</td>
+                            <td>
+                                {{ row.base_weekly_hours }}
+                                {% if row.has_override %}<span class="badge">переопределено</span>{% endif %}
+                            </td>
+                            <td>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    max="40"
+                                    step="1"
+                                    name="load_{{ row.class_subject_id }}"
+                                    value="{{ row.weekly_hours }}"
+                                    class="workload-input"
+                                >
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% else %}
+        <div class="empty">Нет предметов для выбранных классов. Сначала добавьте предметы и назначенных преподавателей.</div>
+    {% endif %}
+</div>
+<script>
+(() => {
+    const initWorkloadEditor = () => {
+    const form = document.getElementById('{{ form_id }}');
+    if (!form) return;
+    const classesField = form.querySelector('select[name="classes"]');
+    const rows = form.querySelectorAll('[data-workload-row]');
+    if (!classesField || !rows.length) return;
+
+    const syncRowsVisibility = () => {
+        const selected = new Set(Array.from(classesField.selectedOptions).map((option) => option.value));
+        const showAll = selected.size === 0;
+        rows.forEach((row) => {
+            const classId = row.getAttribute('data-class-id');
+            row.style.display = showAll || selected.has(classId) ? '' : 'none';
+        });
+    };
+
+    classesField.addEventListener('change', syncRowsVisibility);
+    syncRowsVisibility();
+    };
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initWorkloadEditor, { once: true });
+    } else {
+        initWorkloadEditor();
+    }
+})();
+</script>

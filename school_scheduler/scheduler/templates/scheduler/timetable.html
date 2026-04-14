@@ -1,0 +1,93 @@
+{% extends "scheduler/base.html" %}
+{% load scheduler_extras %}
+
+{% block title %}Расписание на неделю · Школьное расписание{% endblock %}
+
+{% block content %}
+<div class="grid grid-2">
+    <section class="panel">
+        <h2>Недельное расписание</h2>
+        <p class="muted">{{ timetable_scope_label }}</p>
+        <form method="get">
+            {% for field in filter_form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                </div>
+            {% endfor %}
+            <div class="actions">
+                <button type="submit">Обновить</button>
+                <a class="button secondary" href="{% url 'scheduler:schedule_create' %}?week_start={{ week_start|date:'Y-m-d' }}">Добавить занятие вручную</a>
+            </div>
+        </form>
+    </section>
+
+    <section class="panel">
+        <h2>Пересобрать расписание на эту неделю</h2>
+        <p class="muted">Подходит, если вы изменили исходные данные. Закреплённые занятия сохраняются, остальные будут пересчитаны автоматически.</p>
+        <p class="muted">Чтобы пересчитать для всех классов, оставьте поле «Классы» пустым.</p>
+        <form method="post" action="{% url 'scheduler:generate' %}" id="generate-form-timetable">
+            {% csrf_token %}
+            {% include "scheduler/_workload_editor.html" with workload_rows=workload_rows form_id="generate-form-timetable" %}
+            {% for field in generation_form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.help_text %}<div class="muted">{{ field.help_text }}</div>{% endif %}
+                </div>
+            {% endfor %}
+            <button type="submit">Пересчитать неделю</button>
+        </form>
+    </section>
+</div>
+
+<section class="panel" style="margin-top: 1rem;">
+    <div class="actions" style="justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+        <div>
+            <h2 style="margin: 0;">Сетка расписания</h2>
+            <p class="muted" style="margin: 0.35rem 0 0;">Здесь видно, кому принадлежит расписание. Нажмите на занятие, чтобы отредактировать его или закрепить вручную.</p>
+        </div>
+        <a class="button secondary" href="{% url 'scheduler:schedule_create' %}">Создать занятие вручную</a>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Урок</th>
+                    {% for day in grid.weekdays %}
+                        <th>{{ day.label }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in grid.rows %}
+                    <tr>
+                        <td>
+                            <strong>#{{ row.lesson_number }}</strong><br>
+                            <span class="muted">{{ row.time }}</span>
+                        </td>
+                        {% for day in grid.weekdays %}
+                            <td>
+                                {% with lesson=row.cells|get_item:day.date %}
+                                    {% if lesson %}
+                                        <a class="lesson-card" href="{% url 'scheduler:schedule_edit' lesson.pk %}">
+                                            <strong>{{ lesson.subject.name }}</strong>
+                                            <span>{{ lesson.teacher }}</span>
+                                            <span class="muted">{{ lesson.classroom.name }}</span>
+                                            {% if not selected_class %}<span class="muted">Класс {{ lesson.class_obj.name }}</span>{% endif %}
+                                            {% if lesson.is_locked %}<span class="badge locked">Закреплено</span>{% endif %}
+                                        </a>
+                                    {% else %}
+                                        <a class="empty" href="{% url 'scheduler:schedule_create' %}?lesson_date={{ day.date|date:'Y-m-d' }}">Пустой слот</a>
+                                    {% endif %}
+                                {% endwith %}
+                            </td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
