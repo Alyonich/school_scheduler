@@ -7,7 +7,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db import OperationalError, transaction
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -70,29 +70,52 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     filter_form = ScheduleFilterForm(request.GET or None)
     filter_form.is_valid()
     week_start = _filter_week_start(filter_form)
+    week_end = week_start + timedelta(days=5)
+    month_start = week_start.replace(day=1)
+    if month_start.month == 12:
+        month_end = month_start.replace(year=month_start.year + 1, month=1, day=1)
+    else:
+        month_end = month_start.replace(month=month_start.month + 1, day=1)
     summary = {
         'classes': Class.objects.count(),
         'teachers': Teacher.objects.count(),
         'lessons_this_week': Schedule.objects.filter(
             lesson_date__gte=week_start,
-            lesson_date__lt=week_start + timedelta(days=5),
+            lesson_date__lt=week_end,
         ).count(),
         'locked_lessons': Schedule.objects.filter(is_locked=True).count(),
     }
     busiest_teachers = (
-        Teacher.objects.annotate(total_lessons=Count('schedules'))
+        Teacher.objects.annotate(
+            total_lessons=Count('schedules'),
+            lessons_week=Count(
+                'schedules',
+                filter=Q(
+                    schedules__lesson_date__gte=week_start,
+                    schedules__lesson_date__lt=week_end,
+                ),
+            ),
+            lessons_month=Count(
+                'schedules',
+                filter=Q(
+                    schedules__lesson_date__gte=month_start,
+                    schedules__lesson_date__lt=month_end,
+                ),
+            ),
+        )
         .select_related('user')
-        .order_by('-total_lessons', 'user__full_name')[:5]
+        .order_by('-lessons_week', '-lessons_month', '-total_lessons', 'user__full_name')[:8]
     )
     generation_form = ScheduleGenerationForm(initial={'week_start': week_start})
-    workload_rows = _build_workload_rows(week_start=week_start)
+    workload_classes = _build_workload_classes(week_start=week_start)
     return render(
         request,
         'scheduler/dashboard.html',
         {
             'summary': summary,
             'generation_form': generation_form,
-            'workload_rows': workload_rows,
+            'workload_classes': workload_classes,
+            'selected_generation_class_ids': [],
             'filter_form': filter_form,
             'busiest_teachers': busiest_teachers,
         },
@@ -105,7 +128,6 @@ def timetable(request: HttpRequest) -> HttpResponse:
     week_start = _filter_week_start(filter_form)
     selected_class = _filter_value(filter_form, 'class_obj')
     selected_teacher = _filter_value(filter_form, 'teacher')
-    requested_class = selected_class
 
     schedules = (
         Schedule.objects.select_related('class_obj', 'subject', 'teacher__user', 'classroom', 'time_slot__lesson_time')
@@ -123,10 +145,7 @@ def timetable(request: HttpRequest) -> HttpResponse:
 
     grid = build_week_grid(schedules, week_start)
     timetable_scope_label = _build_timetable_scope_label(selected_class, selected_teacher)
-    workload_rows = _build_workload_rows(
-        week_start=week_start,
-        class_ids=[requested_class.id] if requested_class else None,
-    )
+    workload_classes = _build_workload_classes(week_start=week_start)
     return render(
         request,
         'scheduler/timetable.html',
@@ -137,7 +156,8 @@ def timetable(request: HttpRequest) -> HttpResponse:
             'selected_class': selected_class,
             'selected_teacher': selected_teacher,
             'timetable_scope_label': timetable_scope_label,
-            'workload_rows': workload_rows,
+            'workload_classes': workload_classes,
+            'selected_generation_class_ids': [],
             'generation_form': ScheduleGenerationForm(
                 initial={
                     'week_start': week_start,
@@ -161,7 +181,8 @@ def generate_timetable(request: HttpRequest) -> HttpResponse:
             'scheduler/dashboard.html',
             {
                 'generation_form': form,
-                'workload_rows': _build_workload_rows(week_start=fallback_week_start),
+                'workload_classes': _build_workload_classes(week_start=fallback_week_start),
+                'selected_generation_class_ids': _posted_generation_class_ids(request),
                 'summary': _dashboard_summary(week_start=fallback_week_start),
                 'filter_form': ScheduleFilterForm(initial={'week_start': fallback_week_start}),
                 'busiest_teachers': [],
@@ -252,6 +273,41 @@ def generate_timetable(request: HttpRequest) -> HttpResponse:
         messages.warning(
             request,
             f"Есть дни, где занятия начинаются не с первого урока: {result.diagnostics['class_late_start']}."
+        )
+    if result.diagnostics.get('class_daily_overload'):
+        messages.warning(
+            request,
+            f"Есть дни с перегрузкой класса выше дневного лимита: {result.diagnostics['class_daily_overload']}."
+        )
+    if result.diagnostics.get('class_weekly_overload'):
+        messages.warning(
+            request,
+            f"Превышена недельная нагрузка по отдельным классам: {result.diagnostics['class_weekly_overload']}."
+        )
+    if result.diagnostics.get('forbidden_double_lesson'):
+        messages.warning(
+            request,
+            f"Обнаружены недопустимые сдвоенные уроки: {result.diagnostics['forbidden_double_lesson']}."
+        )
+    if result.diagnostics.get('class_daily_imbalance'):
+        messages.warning(
+            request,
+            f"Нагрузка распределена неравномерно по дням: {result.diagnostics['class_daily_imbalance']}."
+        )
+    if result.diagnostics.get('class_sparse_days'):
+        messages.warning(
+            request,
+            f"Есть слишком лёгкие дни при большой недельной нагрузке: {result.diagnostics['class_sparse_days']}."
+        )
+    if result.diagnostics.get('hard_subject_weekday_mismatch'):
+        messages.warning(
+            request,
+            f"Сложные предметы неидеально распределены по дням (лучше вторник/среда): {result.diagnostics['hard_subject_weekday_mismatch']}."
+        )
+    if result.diagnostics.get('subject_alternation'):
+        messages.warning(
+            request,
+            f"Есть проблемы с чередованием предметов в течение дня: {result.diagnostics['subject_alternation']}."
         )
 
     redirect_url = reverse('scheduler:timetable')
@@ -422,6 +478,18 @@ def _posted_week_start(request: HttpRequest) -> date:
     return parsed - timedelta(days=parsed.weekday())
 
 
+def _posted_generation_class_ids(request: HttpRequest) -> list[int]:
+    selected: list[int] = []
+    for raw in request.POST.getlist('classes'):
+        try:
+            class_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if class_id not in selected:
+            selected.append(class_id)
+    return selected
+
+
 def _build_workload_rows(week_start: date, class_ids: list[int] | None = None) -> list[dict]:
     class_subjects_qs = ClassSubject.objects.select_related('class_obj', 'subject').order_by(
         'class_obj__grade',
@@ -457,6 +525,21 @@ def _build_workload_rows(week_start: date, class_ids: list[int] | None = None) -
             }
         )
     return rows
+
+
+def _build_workload_classes(week_start: date) -> list[dict]:
+    classes: dict[int, dict] = {}
+    for row in _build_workload_rows(week_start=week_start):
+        class_item = classes.get(row['class_id'])
+        if class_item is None:
+            class_item = {
+                'class_id': row['class_id'],
+                'class_name': row['class_name'],
+                'subjects': [],
+            }
+            classes[row['class_id']] = class_item
+        class_item['subjects'].append(row)
+    return list(classes.values())
 
 
 def _apply_weekly_workload_overrides(

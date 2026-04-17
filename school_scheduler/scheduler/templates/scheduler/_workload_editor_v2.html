@@ -1,0 +1,162 @@
+<div class="field">
+    <label>Классы для пересборки</label>
+    <div class="muted">Отметьте чекбоксами классы, для которых нужен пересчёт. Если ничего не выбрать, пересчёт будет для всех классов.</div>
+
+    {% if generation_form.classes.errors %}
+        {% for error in generation_form.classes.errors %}
+            <div class="message error">{{ error }}</div>
+        {% endfor %}
+    {% endif %}
+
+    {% if workload_classes %}
+        <div class="class-selector" data-class-selector>
+            {% for class_item in workload_classes %}
+                <label class="class-chip" data-class-chip data-class-id="{{ class_item.class_id }}">
+                    <span class="class-chip-row">
+                        <input
+                            type="checkbox"
+                            name="classes"
+                            value="{{ class_item.class_id }}"
+                            data-class-checkbox
+                            {% if class_item.class_id in selected_generation_class_ids %}checked{% endif %}
+                        >
+                        <strong>{{ class_item.class_name }}</strong>
+                    </span>
+                    <span class="chip-meta">{{ class_item.subjects|length }} предметов для корректировки</span>
+                </label>
+            {% endfor %}
+        </div>
+        <div class="muted workload-hint" data-active-class-hint>Выберите класс, чтобы изменить его нагрузку.</div>
+    {% else %}
+        <div class="empty">Нет предметов для корректировки нагрузки.</div>
+    {% endif %}
+</div>
+
+{% if workload_classes %}
+    <div class="field">
+        <label>Нагрузка по предметам выбранного класса</label>
+        <div class="muted">Изменения сохраняются при переключении между классами и применяются после нажатия кнопки пересчёта.</div>
+
+        {% for class_item in workload_classes %}
+            <div class="workload-class-panel" data-class-panel data-class-id="{{ class_item.class_id }}">
+                <div class="table-wrap">
+                    <table class="workload-table">
+                        <thead>
+                            <tr>
+                                <th>Предмет</th>
+                                <th>Базовая нагрузка</th>
+                                <th>Часов на неделю</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in class_item.subjects %}
+                                <tr>
+                                    <td>{{ row.subject_name }}</td>
+                                    <td>
+                                        {{ row.base_weekly_hours }}
+                                        {% if row.has_override %}<span class="badge">изменено</span>{% endif %}
+                                    </td>
+                                    <td>
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max="40"
+                                            step="1"
+                                            name="load_{{ row.class_subject_id }}"
+                                            value="{{ row.weekly_hours }}"
+                                            class="workload-input"
+                                        >
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+{% endif %}
+
+<script>
+(() => {
+    const initWorkloadEditor = () => {
+        const form = document.getElementById('{{ form_id }}');
+        if (!form) return;
+
+        const chips = Array.from(form.querySelectorAll('[data-class-chip]'));
+        const panels = Array.from(form.querySelectorAll('[data-class-panel]'));
+        const hint = form.querySelector('[data-active-class-hint]');
+        if (!chips.length || !panels.length) return;
+
+        let activeClassId = null;
+
+        const getCheckedClassIds = () => {
+            return chips
+                .filter((chip) => chip.querySelector('[data-class-checkbox]')?.checked)
+                .map((chip) => chip.getAttribute('data-class-id'));
+        };
+
+        const syncUi = () => {
+            const checkedIds = getCheckedClassIds();
+            if (checkedIds.length === 0) {
+                activeClassId = null;
+            } else if (!activeClassId || !checkedIds.includes(activeClassId)) {
+                activeClassId = checkedIds[checkedIds.length - 1];
+            }
+
+            chips.forEach((chip) => {
+                const classId = chip.getAttribute('data-class-id');
+                const checkbox = chip.querySelector('[data-class-checkbox]');
+                const selected = Boolean(checkbox?.checked);
+                chip.classList.toggle('is-selected', selected);
+                chip.classList.toggle('is-active', selected && classId === activeClassId);
+            });
+
+            panels.forEach((panel) => {
+                const classId = panel.getAttribute('data-class-id');
+                panel.classList.toggle('is-active', classId === activeClassId);
+            });
+
+            if (hint) {
+                if (activeClassId) {
+                    const activeChip = chips.find((chip) => chip.getAttribute('data-class-id') === activeClassId);
+                    const title = activeChip?.querySelector('strong')?.textContent?.trim() || '';
+                    hint.textContent = `Сейчас редактируется нагрузка класса ${title}.`;
+                } else {
+                    hint.textContent = 'Выберите класс, чтобы изменить его нагрузку.';
+                }
+            }
+        };
+
+        chips.forEach((chip) => {
+            const checkbox = chip.querySelector('[data-class-checkbox]');
+            if (!checkbox) return;
+
+            checkbox.addEventListener('change', () => {
+                if (checkbox.checked) {
+                    activeClassId = chip.getAttribute('data-class-id');
+                }
+                syncUi();
+            });
+
+            chip.addEventListener('click', (event) => {
+                if (event.target === checkbox) return;
+                event.preventDefault();
+                checkbox.checked = !checkbox.checked;
+                if (checkbox.checked) {
+                    activeClassId = chip.getAttribute('data-class-id');
+                }
+                syncUi();
+            });
+        });
+
+        syncUi();
+    };
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initWorkloadEditor, { once: true });
+    } else {
+        initWorkloadEditor();
+    }
+})();
+</script>

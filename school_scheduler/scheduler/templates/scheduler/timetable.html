@@ -28,13 +28,15 @@
         <p class="muted">Чтобы пересчитать для всех классов, оставьте поле «Классы» пустым.</p>
         <form method="post" action="{% url 'scheduler:generate' %}" id="generate-form-timetable">
             {% csrf_token %}
-            {% include "scheduler/_workload_editor.html" with workload_rows=workload_rows form_id="generate-form-timetable" %}
+            {% include "scheduler/_workload_editor_v2.html" with workload_classes=workload_classes selected_generation_class_ids=selected_generation_class_ids generation_form=generation_form form_id="generate-form-timetable" %}
             {% for field in generation_form %}
+                {% if field.name != 'classes' %}
                 <div class="field">
                     <label for="{{ field.id_for_label }}">{{ field.label }}</label>
                     {{ field }}
                     {% if field.help_text %}<div class="muted">{{ field.help_text }}</div>{% endif %}
                 </div>
+                {% endif %}
             {% endfor %}
             <button type="submit">Пересчитать неделю</button>
         </form>

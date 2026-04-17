@@ -32,15 +32,17 @@
         <p class="muted">Система учитывает конфликты, доступность преподавателей, ограничения по предметам и старается не допускать окон между уроками.</p>
         <form method="post" action="{% url 'scheduler:generate' %}" id="generate-form-dashboard">
             {% csrf_token %}
+            {% include "scheduler/_workload_editor_v2.html" with workload_classes=workload_classes selected_generation_class_ids=selected_generation_class_ids generation_form=generation_form form_id="generate-form-dashboard" %}
             {% for field in generation_form %}
+                {% if field.name != 'classes' %}
                 <div class="field">
                     <label for="{{ field.id_for_label }}">{{ field.label }}</label>
                     {{ field }}
                     {% if field.help_text %}<div class="muted">{{ field.help_text }}</div>{% endif %}
                     {% for error in field.errors %}<div class="message error">{{ error }}</div>{% endfor %}
                 </div>
+                {% endif %}
             {% endfor %}
-            {% include "scheduler/_workload_editor.html" with workload_rows=workload_rows form_id="generate-form-dashboard" %}
             <button type="submit">Составить расписание</button>
         </form>
     </section>
@@ -63,18 +65,27 @@
 
     <section class="panel">
         <h2>Самые загруженные преподаватели</h2>
+        <p class="muted">Показатели: за выбранную неделю, за текущий месяц этой недели и за всё время.</p>
         {% if busiest_teachers %}
             <table>
                 <thead>
-                    <tr>
+                    <tr style="display:none;">
                         <th>Преподаватель</th>
                         <th>Всего занятий</th>
+                    </tr>
+                    <tr>
+                        <th>Преподаватель</th>
+                        <th>За неделю</th>
+                        <th>За месяц</th>
+                        <th>За всё время</th>
                     </tr>
                 </thead>
                 <tbody>
                     {% for teacher in busiest_teachers %}
                         <tr>
                             <td>{{ teacher }}</td>
+                            <td>{{ teacher.lessons_week }}</td>
+                            <td>{{ teacher.lessons_month }}</td>
                             <td>{{ teacher.total_lessons }}</td>
                         </tr>
                     {% endfor %}

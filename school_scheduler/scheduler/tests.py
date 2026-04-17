@@ -20,6 +20,7 @@ from .models import (
     Weekday,
 )
 from .services.schedule_generator import GeneticScheduleGenerator
+from .services.schedule_generator.data_loader import load_generation_context
 
 
 class SchedulerSmokeTests(TestCase):
@@ -78,6 +79,8 @@ class SchedulerSmokeTests(TestCase):
         )
         self.assertEqual(result.hard_penalty, 0)
         self.assertEqual(result.diagnostics.get('class_gap', 0), 0)
+        self.assertEqual(result.diagnostics.get('class_daily_overload', 0), 0)
+        self.assertEqual(result.diagnostics.get('forbidden_double_lesson', 0), 0)
 
         seen_slots = set()
         subject_daily = {}
@@ -95,6 +98,33 @@ class SchedulerSmokeTests(TestCase):
             self.assertEqual(min(lesson_numbers), 1)
             ordered = sorted(set(lesson_numbers))
             self.assertEqual((ordered[-1] - ordered[0] + 1) - len(ordered), 0)
+
+    def test_generation_context_applies_weekly_grade_limits(self):
+        User = get_user_model()
+        class_obj = Class.objects.create(
+            name='10A',
+            grade=10,
+            parallel='A',
+            students_count=22,
+            education_level=EducationLevel.HIGH,
+        )
+        subject = Subject.objects.create(name='Physics', required_room_type=RoomType.ORDINARY, max_lessons_per_day=2)
+        ClassSubject.objects.create(class_obj=class_obj, subject=subject, weekly_hours=30)
+
+        user = User.objects.create_user(
+            username='physics_10',
+            password='test12345',
+            role=UserRole.TEACHER,
+            full_name='Physics Teacher 10A',
+        )
+        teacher = Teacher.objects.create(user=user, qualification='Physics', workload_hours=40, max_lessons_per_day=7)
+        TeachingAssignment.objects.create(teacher=teacher, subject=subject, class_obj=class_obj, hours_per_week=30)
+        for slot in TimeSlot.objects.all():
+            TeacherAvailability.objects.create(teacher=teacher, time_slot=slot, is_available=True)
+
+        context = load_generation_context(self.week_start, class_ids=[class_obj.id])
+        self.assertEqual(len(context.lesson_requirements), 24)
+        self.assertTrue(any('СанПиН' in warning for warning in context.warnings))
 
     def test_timetable_page_renders(self):
         GeneticScheduleGenerator(population_size=30, generations=50, mutation_rate=0.2, seed=3).generate(

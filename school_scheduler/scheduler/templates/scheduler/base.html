@@ -171,6 +171,57 @@
             max-width: 120px;
         }
 
+        .class-selector {
+            margin-top: 0.35rem;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 0.55rem;
+        }
+
+        .class-chip {
+            display: grid;
+            gap: 0.25rem;
+            padding: 0.75rem 0.8rem;
+            border-radius: 14px;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.7);
+            cursor: pointer;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+        }
+
+        .class-chip-row {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+        }
+
+        .chip-meta {
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        .class-chip.is-selected {
+            border-color: rgba(15, 118, 110, 0.35);
+            background: rgba(15, 118, 110, 0.08);
+        }
+
+        .class-chip.is-active {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.18);
+        }
+
+        .workload-hint {
+            margin-top: 0.45rem;
+        }
+
+        .workload-class-panel {
+            display: none;
+        }
+
+        .workload-class-panel.is-active {
+            display: block;
+        }
+
         th {
             text-align: left;
             color: var(--muted);

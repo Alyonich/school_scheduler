@@ -7,6 +7,7 @@ from scheduler.models import IntegrationLog, Schedule
 
 from .chromosome import Chromosome
 from .data_loader import GenerationContext
+from .school_rules import allows_double_lesson, is_pe_subject
 
 
 def persist_schedule(chromosome: Chromosome, context: GenerationContext) -> tuple[int, int]:
@@ -14,7 +15,7 @@ def persist_schedule(chromosome: Chromosome, context: GenerationContext) -> tupl
 
     slot_lookup = {slot.id: slot for slot in context.time_slots}
     existing = list(
-        Schedule.objects.filter(
+        Schedule.objects.select_related('subject', 'time_slot__lesson_time').filter(
             class_obj_id__in=context.class_ids,
             lesson_date__gte=context.week_start,
             lesson_date__lt=week_end,
@@ -24,10 +25,22 @@ def persist_schedule(chromosome: Chromosome, context: GenerationContext) -> tupl
     used_class = {(item.class_obj_id, item.lesson_date, item.time_slot_id) for item in existing}
     used_teacher = {(item.teacher_id, item.lesson_date, item.time_slot_id) for item in existing}
     used_room = {(item.classroom_id, item.lesson_date, item.time_slot_id) for item in existing}
-    daily_subject_counts = {}
+    daily_subject_counts: dict[tuple[int, int, date], int] = {}
+    teacher_daily_counts: dict[tuple[int, date], int] = {}
+    class_daily_lessons: dict[tuple[int, date], list[tuple[int, str, str]]] = {}
     for item in existing:
         key = (item.class_obj_id, item.subject_id, item.lesson_date)
         daily_subject_counts[key] = daily_subject_counts.get(key, 0) + 1
+        teacher_day_key = (item.teacher_id, item.lesson_date)
+        teacher_daily_counts[teacher_day_key] = teacher_daily_counts.get(teacher_day_key, 0) + 1
+        class_day_key = (item.class_obj_id, item.lesson_date)
+        class_daily_lessons.setdefault(class_day_key, []).append(
+            (
+                item.time_slot.lesson_time.lesson_number,
+                item.subject.name,
+                item.subject.required_room_type,
+            )
+        )
 
     scheduled_items = list(zip(context.lesson_requirements, chromosome.placements))
     scheduled_items.sort(
@@ -51,6 +64,8 @@ def persist_schedule(chromosome: Chromosome, context: GenerationContext) -> tupl
             used_teacher=used_teacher,
             used_room=used_room,
             daily_subject_counts=daily_subject_counts,
+            teacher_daily_counts=teacher_daily_counts,
+            class_daily_lessons=class_daily_lessons,
         )
         if staged:
             staged_schedules.append(staged)
@@ -84,6 +99,8 @@ def _place_requirement(
     used_teacher: set[tuple[int, date, int]],
     used_room: set[tuple[int, date, int]],
     daily_subject_counts: dict[tuple[int, int, date], int],
+    teacher_daily_counts: dict[tuple[int, date], int],
+    class_daily_lessons: dict[tuple[int, date], list[tuple[int, str, str]]],
 ) -> Schedule | None:
     room_ids = _compatible_rooms(requirement, context)
     if not room_ids:
@@ -106,10 +123,21 @@ def _place_requirement(
         teacher_key = (requirement.teacher_id, lesson_date, time_slot_id)
         room_key = (room_id, lesson_date, time_slot_id)
         subject_day_key = (requirement.class_id, requirement.subject_id, lesson_date)
+        teacher_day_key = (requirement.teacher_id, lesson_date)
+        class_day_key = (requirement.class_id, lesson_date)
 
         if class_key in used_class or teacher_key in used_teacher or room_key in used_room:
             continue
         if daily_subject_counts.get(subject_day_key, 0) >= requirement.daily_limit:
+            continue
+        if teacher_daily_counts.get(teacher_day_key, 0) >= requirement.teacher_daily_limit:
+            continue
+
+        day_lessons = class_daily_lessons.get(class_day_key, [])
+        projected_day = day_lessons + [(slot.lesson_number, requirement.subject_name, requirement.required_room_type)]
+        if len(projected_day) > _allowed_daily_limit(requirement, projected_day):
+            continue
+        if _has_forbidden_double_lessons(requirement.class_grade, projected_day):
             continue
 
         candidate = Schedule(
@@ -125,9 +153,54 @@ def _place_requirement(
         used_teacher.add(teacher_key)
         used_room.add(room_key)
         daily_subject_counts[subject_day_key] = daily_subject_counts.get(subject_day_key, 0) + 1
+        teacher_daily_counts[teacher_day_key] = teacher_daily_counts.get(teacher_day_key, 0) + 1
+        class_daily_lessons.setdefault(class_day_key, []).append(
+            (slot.lesson_number, requirement.subject_name, requirement.required_room_type)
+        )
         return candidate
 
     return None
+
+
+def _allowed_daily_limit(requirement, day_lessons: list[tuple[int, str, str]]) -> int:
+    limit = requirement.class_daily_limit
+    if requirement.class_grade <= 4 and any(is_pe_subject(subject_name) for _n, subject_name, _room in day_lessons):
+        limit += 1
+    return limit
+
+
+def _has_forbidden_double_lessons(class_grade: int, day_lessons: list[tuple[int, str, str]]) -> bool:
+    if len(day_lessons) < 2:
+        return False
+
+    ordered = sorted(day_lessons, key=lambda item: item[0])
+    run_subject = ordered[0][1]
+    run_room_type = ordered[0][2]
+    run_length = 1
+    previous_number = ordered[0][0]
+
+    for lesson_number, subject_name, room_type in ordered[1:]:
+        is_consecutive = lesson_number == previous_number + 1
+        is_same_subject = subject_name == run_subject
+        if is_consecutive and is_same_subject:
+            run_length += 1
+        else:
+            if _run_is_forbidden(class_grade, run_subject, run_room_type, run_length):
+                return True
+            run_subject = subject_name
+            run_room_type = room_type
+            run_length = 1
+        previous_number = lesson_number
+
+    return _run_is_forbidden(class_grade, run_subject, run_room_type, run_length)
+
+
+def _run_is_forbidden(class_grade: int, subject_name: str, room_type: str, run_length: int) -> bool:
+    if run_length <= 1:
+        return False
+    if run_length > 2:
+        return True
+    return not allows_double_lesson(class_grade, subject_name, room_type)
 
 
 def _compatible_rooms(requirement, context: GenerationContext) -> list[int]:
