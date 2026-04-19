@@ -1,0 +1,199 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}Прогресс генерации · Школьное расписание{% endblock %}
+
+{% block content %}
+<section class="panel progress-page">
+    <div class="progress-header">
+        <div>
+            <h2 id="job-title" style="margin: 0;">{{ job.stage_label }}</h2>
+            <p id="job-message" class="muted" style="margin: 0.45rem 0 0;">{{ job.message }}</p>
+        </div>
+        <div class="actions">
+            <a class="button secondary" href="{{ job.result_url }}">К расписанию</a>
+            <a class="button secondary" href="{% url 'scheduler:dashboard' %}">На главную</a>
+        </div>
+    </div>
+
+    <div class="progress-track progress-track-large" aria-hidden="true">
+        <div id="job-progress-bar" class="progress-fill" style="width: {{ job.progress_percent }}%;"></div>
+    </div>
+    <div class="progress-meta">
+        <span id="job-progress-value">{{ job.progress_percent }}%</span>
+        <span id="job-state" class="badge">{{ job.state }}</span>
+        <span class="muted">Неделя {{ job.week_start }}</span>
+        <span class="muted">Классов в задаче: {{ job.class_ids|length }}</span>
+    </div>
+
+    <div class="grid grid-2" style="margin-top: 1rem;">
+        <section class="metric">
+            <strong id="job-created-lessons">{{ job.created_lessons|default_if_none:"—" }}</strong>
+            <span class="muted">Создано занятий</span>
+        </section>
+        <section class="metric">
+            <strong id="job-penalties">{{ job.hard_penalty|default_if_none:"—" }} / {{ job.soft_penalty|default_if_none:"—" }}</strong>
+            <span class="muted">Жесткий / мягкий штраф</span>
+        </section>
+    </div>
+</section>
+
+<div class="grid grid-2" style="margin-top: 1rem;">
+    <section class="panel">
+        <h2>Последние шаги</h2>
+        <p class="muted">Страница обновляется автоматически, поэтому можно просто держать ее открытой.</p>
+        <div id="job-events" class="timeline">
+            {% for event in job.events reversed %}
+                <div class="timeline-item">
+                    <strong>{{ event.progress_percent }}%</strong>
+                    <span>{{ event.message }}</span>
+                    <span class="muted">{{ event.timestamp|slice:":16"|cut:"T" }}</span>
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Итог и предупреждения</h2>
+        <div id="job-result-note" class="empty">
+            {% if job.state == 'completed' %}
+                Расписание построено. Можно открыть недельную сетку и проверить предупреждения ниже.
+            {% elif job.state == 'failed' %}
+                Генерация завершилась с ошибкой. Текст ошибки и диагностические сообщения показаны ниже.
+            {% else %}
+                Пока идет расчет. Когда задача завершится, здесь появится итог и список предупреждений.
+            {% endif %}
+        </div>
+        <div id="job-error-box"{% if not job.error %} style="display:none;"{% endif %} class="message error">
+            <strong>Ошибка:</strong> <span id="job-error-text">{{ job.error }}</span>
+        </div>
+        <div id="job-warnings">
+            {% for warning in job.warnings %}
+                <div class="message warning">{{ warning }}</div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+
+{{ job_payload|json_script:"generation-job-data" }}
+<script>
+(() => {
+    const eventsUrl = "{% url 'scheduler:generation_events' job.job_id %}";
+    const dataNode = document.getElementById("generation-job-data");
+    const finalStates = new Set(["completed", "failed", "cancelled"]);
+    let current = JSON.parse(dataNode.textContent);
+    let stream = null;
+
+    const titleNode = document.getElementById("job-title");
+    const messageNode = document.getElementById("job-message");
+    const progressBarNode = document.getElementById("job-progress-bar");
+    const progressValueNode = document.getElementById("job-progress-value");
+    const stateNode = document.getElementById("job-state");
+    const createdLessonsNode = document.getElementById("job-created-lessons");
+    const penaltiesNode = document.getElementById("job-penalties");
+    const resultNoteNode = document.getElementById("job-result-note");
+    const eventsNode = document.getElementById("job-events");
+    const warningsNode = document.getElementById("job-warnings");
+    const errorBoxNode = document.getElementById("job-error-box");
+    const errorTextNode = document.getElementById("job-error-text");
+
+    function renderEvents(events) {
+        eventsNode.innerHTML = "";
+        const ordered = [...events].reverse();
+        for (const event of ordered) {
+            const item = document.createElement("div");
+            item.className = "timeline-item";
+            const percent = document.createElement("strong");
+            percent.textContent = `${event.progress_percent}%`;
+            const message = document.createElement("span");
+            message.textContent = event.message;
+            const timestamp = document.createElement("span");
+            timestamp.className = "muted";
+            timestamp.textContent = event.timestamp.slice(0, 16).replace("T", " ");
+            item.appendChild(percent);
+            item.appendChild(message);
+            item.appendChild(timestamp);
+            eventsNode.appendChild(item);
+        }
+    }
+
+    function renderWarnings(warnings) {
+        warningsNode.innerHTML = "";
+        for (const warning of warnings) {
+            const item = document.createElement("div");
+            item.className = "message warning";
+            item.textContent = warning;
+            warningsNode.appendChild(item);
+        }
+    }
+
+    function render(data) {
+        current = data;
+        titleNode.textContent = data.stage_label;
+        messageNode.textContent = data.message;
+        progressBarNode.style.width = `${data.progress_percent}%`;
+        progressValueNode.textContent = `${data.progress_percent}%`;
+        stateNode.textContent = data.state;
+        createdLessonsNode.textContent = data.created_lessons ?? "—";
+        penaltiesNode.textContent = data.hard_penalty != null || data.soft_penalty != null
+            ? `${data.hard_penalty ?? 0} / ${data.soft_penalty ?? 0}`
+            : "—";
+        renderEvents(data.events || []);
+        renderWarnings(data.warnings || []);
+
+        if (data.error) {
+            errorBoxNode.style.display = "";
+            errorTextNode.textContent = data.error;
+        } else {
+            errorBoxNode.style.display = "none";
+        }
+
+        if (data.state === "completed") {
+            resultNoteNode.textContent = "Расписание построено. Можно открыть недельную сетку и проверить предупреждения ниже.";
+        } else if (data.state === "failed") {
+            resultNoteNode.textContent = "Генерация завершилась с ошибкой. Проверьте текст ошибки и скорректируйте входные данные.";
+        } else if (data.state === "cancelled") {
+            resultNoteNode.textContent = "Генерация была остановлена до завершения.";
+        } else {
+            resultNoteNode.textContent = "Пока идет расчет. Когда задача завершится, здесь появится итог и список предупреждений.";
+        }
+    }
+
+    function connectStream() {
+        if (finalStates.has(current.state) || typeof window.EventSource === "undefined") {
+            return;
+        }
+        if (stream) {
+            stream.close();
+        }
+
+        stream = new EventSource(eventsUrl);
+        stream.addEventListener("status", (event) => {
+            const data = JSON.parse(event.data);
+            render(data);
+            if (finalStates.has(data.state) && stream) {
+                stream.close();
+                stream = null;
+            }
+        });
+        stream.addEventListener("missing", () => {
+            if (stream) {
+                stream.close();
+                stream = null;
+            }
+            resultNoteNode.textContent = "Задача генерации больше недоступна на сервере.";
+        });
+        stream.onerror = () => {
+            if (stream && finalStates.has(current.state)) {
+                stream.close();
+                stream = null;
+            }
+        };
+    }
+
+    render(current);
+    if (!finalStates.has(current.state)) {
+        connectStream();
+    }
+})();
+</script>
+{% endblock %}

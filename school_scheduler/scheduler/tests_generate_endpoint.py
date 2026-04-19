@@ -2,7 +2,7 @@ from datetime import date, time
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .models import (
@@ -24,7 +24,7 @@ from .models import (
     Weekday,
 )
 
-
+@override_settings(SCHEDULER_GENERATION_RUN_INLINE=True)
 class GenerateEndpointTests(TestCase):
     def setUp(self):
         self.week_start = date(2026, 4, 6)
@@ -84,6 +84,7 @@ class GenerateEndpointTests(TestCase):
             },
         )
         self.assertEqual(response.status_code, 302)
+        self.assertIn('/generate/jobs/', response.url)
         self.assertGreater(IntegrationLog.objects.count(), before)
 
     def test_generate_returns_redirect_when_process_lock_busy(self):
@@ -110,6 +111,7 @@ class GenerateEndpointTests(TestCase):
             },
         )
         self.assertEqual(response.status_code, 302)
+        self.assertIn('/generate/jobs/', response.url)
 
         override_math = WeeklyClassSubjectLoad.objects.get(
             week_start=self.week_start,
@@ -136,3 +138,42 @@ class GenerateEndpointTests(TestCase):
         ).count()
         self.assertEqual(math_count, 1)
         self.assertEqual(english_count, 2)
+
+    def test_generation_progress_status_returns_completed_payload(self):
+        client = Client()
+        response = client.post(
+            reverse('scheduler:generate'),
+            {
+                'week_start': self.week_start.isoformat(),
+                'generation_mode': 'balanced',
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        status_response = client.get(f'{response.url}status/')
+        self.assertEqual(status_response.status_code, 200)
+        payload = status_response.json()
+        self.assertEqual(payload['state'], 'completed')
+        self.assertEqual(payload['progress_percent'], 100)
+        self.assertIn('created_lessons', payload)
+
+    def test_generation_progress_events_streams_status(self):
+        client = Client()
+        response = client.post(
+            reverse('scheduler:generate'),
+            {
+                'week_start': self.week_start.isoformat(),
+                'generation_mode': 'balanced',
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        events_response = client.get(f'{response.url}events/')
+        self.assertEqual(events_response.status_code, 200)
+        self.assertIn('text/event-stream', events_response['Content-Type'])
+
+        stream = events_response.streaming_content
+        first_chunk = next(stream).decode('utf-8')
+        second_chunk = next(stream).decode('utf-8')
+        self.assertIn('retry: 5000', first_chunk)
+        self.assertIn('event: status', second_chunk)

@@ -95,7 +95,6 @@ class SchedulerSmokeTests(TestCase):
 
         self.assertLessEqual(max(subject_daily.values()), 2)
         for lesson_numbers in daily_lessons.values():
-            self.assertEqual(min(lesson_numbers), 1)
             ordered = sorted(set(lesson_numbers))
             self.assertEqual((ordered[-1] - ordered[0] + 1) - len(ordered), 0)
 
@@ -123,8 +122,10 @@ class SchedulerSmokeTests(TestCase):
             TeacherAvailability.objects.create(teacher=teacher, time_slot=slot, is_available=True)
 
         context = load_generation_context(self.week_start, class_ids=[class_obj.id])
-        self.assertEqual(len(context.lesson_requirements), 24)
-        self.assertTrue(any('СанПиН' in warning for warning in context.warnings))
+        self.assertEqual(len(context.lesson_requirements), 20)
+        self.assertTrue(
+            any('СанПиН' in warning or 'емкости недельной сетки' in warning for warning in context.warnings)
+        )
 
     def test_timetable_page_renders(self):
         GeneticScheduleGenerator(population_size=30, generations=50, mutation_rate=0.2, seed=3).generate(

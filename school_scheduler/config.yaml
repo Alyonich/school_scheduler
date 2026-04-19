@@ -1,0 +1,44 @@
+algorithm:
+  csp:
+    timeout_seconds: 30
+    solver_backtrack: true
+    seed_solution_limit: 100
+  ga:
+    population_size: 200
+    generations: 500
+    crossover_rate: 0.85
+    mutation_rate: 0.15
+    elitism_count: 10
+    local_search_iterations: 20
+    csp_seed_fraction: 0.5
+    local_search_fraction: 0.1
+  weights:
+    weekly_load_penalty: 10.0
+    daily_unevenness_penalty: 8.0
+    teacher_gap_penalty: 5.0
+    class_gap_penalty: 5.0
+    teacher_preference_penalty: 6.0
+    hard_subject_position_penalty: 7.0
+    doubled_subject_penalty: 8.0
+    sanpin_score_penalty: 15.0
+    peak_day_penalty: 6.0
+    class_window_penalty: 6.0
+    teacher_window_penalty: 5.0
+
+school:
+  name: "МБОУ СОШ №1"
+  start_time: "08:30"
+  lesson_duration_minutes: 45
+  breaks: [10, 20, 10, 20, 10]
+  shifts: 1
+  max_lessons_per_day: 6
+  multi_shift_break_minutes: 30
+  sanpin_compliance: true
+  has_extracurricular: false
+  weekdays: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+
+sanpin:
+  enable_score_caps: true
+  primary_light_weekday: "wednesday"
+  middle_peak_weekdays: ["tuesday", "wednesday"]
+  high_peak_weekdays: ["tuesday", "wednesday"]

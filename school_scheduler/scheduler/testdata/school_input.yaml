@@ -1,0 +1,25 @@
+school:
+  name: Demo School
+  shifts: 1
+  start_time: "08:30"
+
+teachers:
+  - full_name: "Ivan Ivanov"
+    subjects: ["Mathematics"]
+    max_weekly_load: 20
+
+classes:
+  - name: "5A"
+    grade: 5
+    students_count: 24
+    weekly_subject_hours:
+      Mathematics: 5
+
+subjects:
+  - name: "Mathematics"
+    required_room_type: ordinary
+
+classrooms:
+  - name: "101"
+    capacity: 30
+    room_type: ordinary

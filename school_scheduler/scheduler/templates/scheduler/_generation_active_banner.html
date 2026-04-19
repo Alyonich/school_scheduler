@@ -1,0 +1,18 @@
+{% if job %}
+<section class="panel progress-banner">
+    <div class="progress-header">
+        <div>
+            <h2 style="margin: 0;">Генерация расписания идет</h2>
+            <p class="muted" style="margin: 0.35rem 0 0;">{{ job.stage_label }}. {{ job.message }}</p>
+        </div>
+        <a class="button secondary" href="{% url 'scheduler:generation_progress' job.job_id %}">Открыть прогресс</a>
+    </div>
+    <div class="progress-track" aria-hidden="true">
+        <div class="progress-fill" style="width: {{ job.progress_percent }}%;"></div>
+    </div>
+    <div class="progress-meta">
+        <span>{{ job.progress_percent }}%</span>
+        <span class="muted">Обновлено {{ job.updated_at|slice:":16"|cut:"T" }}</span>
+    </div>
+</section>
+{% endif %}

@@ -1,4 +1,5 @@
 from datetime import date, timedelta
+import json
 import os
 from pathlib import Path
 import threading
@@ -6,13 +7,21 @@ import threading
 from django.conf import settings
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import OperationalError, transaction
+from django.db import OperationalError, close_old_connections, transaction
 from django.db.models import Count, Q
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 
 from .forms import ScheduleEntryForm, ScheduleFilterForm, ScheduleGenerationForm, current_monday
+from .generation_jobs import (
+    GenerationAlreadyRunningError,
+    get_active_generation_job,
+    get_generation_job,
+    start_generation_job,
+    update_generation_job,
+    wait_for_generation_job_update,
+)
 from .models import Class, ClassSubject, Schedule, ScheduleChange, ScheduleChangeType, Teacher, TimeSlot, WeeklyClassSubjectLoad, Weekday
 from .services.schedule_generator import GeneticScheduleGenerator
 
@@ -52,6 +61,13 @@ def _acquire_generation_process_lock():
 def _release_generation_process_lock(lock_handle) -> None:
     if lock_handle is None:
         return
+    try:
+        lock_handle.seek(0)
+        lock_handle.truncate()
+        lock_handle.write(b'0')
+        lock_handle.flush()
+    except OSError:
+        pass
     try:
         if os.name == 'nt':
             lock_handle.seek(0)
@@ -118,6 +134,7 @@ def dashboard(request: HttpRequest) -> HttpResponse:
             'selected_generation_class_ids': [],
             'filter_form': filter_form,
             'busiest_teachers': busiest_teachers,
+            'active_generation_job': get_active_generation_job(),
         },
     )
 
@@ -164,6 +181,7 @@ def timetable(request: HttpRequest) -> HttpResponse:
                     'generation_mode': ScheduleGenerationForm.GenerationMode.BALANCED,
                 }
             ),
+            'active_generation_job': get_active_generation_job(),
         },
     )
 
@@ -316,6 +334,267 @@ def generate_timetable(request: HttpRequest) -> HttpResponse:
     else:
         redirect_url += f'?week_start={week_start.isoformat()}'
     return redirect(redirect_url)
+
+
+def start_generation(request: HttpRequest) -> HttpResponse:
+    if request.method != 'POST':
+        return redirect('scheduler:dashboard')
+
+    form = ScheduleGenerationForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, 'Пожалуйста, исправьте поля формы генерации.')
+        fallback_week_start = _posted_week_start(request)
+        return render(
+            request,
+            'scheduler/dashboard.html',
+            {
+                'generation_form': form,
+                'workload_classes': _build_workload_classes(week_start=fallback_week_start),
+                'selected_generation_class_ids': _posted_generation_class_ids(request),
+                'summary': _dashboard_summary(week_start=fallback_week_start),
+                'filter_form': ScheduleFilterForm(initial={'week_start': fallback_week_start}),
+                'busiest_teachers': [],
+                'active_generation_job': get_active_generation_job(),
+            },
+        )
+
+    class_ids = list(form.cleaned_data['classes'].values_list('id', flat=True))
+    week_start = form.cleaned_data['week_start']
+    changed_overrides, workload_errors = _apply_weekly_workload_overrides(
+        request=request,
+        week_start=week_start,
+        class_ids=class_ids,
+        save_as_default=form.cleaned_data.get('save_workload_as_default', False),
+    )
+    if changed_overrides:
+        messages.success(
+            request,
+            f'Нагрузка обновлена: {changed_overrides}. Генерация выполнится с новыми значениями.'
+        )
+    for warning in workload_errors:
+        messages.warning(request, warning)
+
+    redirect_target = _build_generation_result_url(week_start=week_start, class_ids=class_ids)
+    generator_settings = form.get_generator_settings()
+    run_inline = getattr(settings, 'SCHEDULER_GENERATION_RUN_INLINE', False)
+
+    if not GENERATION_LOCK.acquire(blocking=False):
+        active_job = get_active_generation_job()
+        messages.warning(
+            request,
+            'Сейчас уже выполняется пересчет расписания. Откройте экран прогресса и дождитесь завершения.'
+        )
+        if active_job is not None:
+            return redirect('scheduler:generation_progress', job_id=active_job.job_id)
+        return redirect(redirect_target)
+
+    process_lock = None
+    try:
+        process_lock = _acquire_generation_process_lock()
+        if process_lock is None:
+            active_job = get_active_generation_job()
+            messages.warning(
+                request,
+                'Сейчас уже выполняется пересчет расписания. Дождитесь завершения текущей генерации.'
+            )
+            if active_job is not None:
+                return redirect('scheduler:generation_progress', job_id=active_job.job_id)
+            return redirect(redirect_target)
+
+        job = start_generation_job(
+            week_start=week_start,
+            class_ids=class_ids,
+            result_url=redirect_target,
+            worker=lambda job_id: _run_generation_job(
+                job_id=job_id,
+                week_start=week_start,
+                class_ids=class_ids,
+                generator_settings=generator_settings,
+                process_lock=process_lock,
+                manage_db_connections=not run_inline,
+            ),
+            run_inline=run_inline,
+        )
+    except GenerationAlreadyRunningError as exc:
+        if process_lock is not None:
+            _release_generation_process_lock(process_lock)
+        active_job = get_generation_job(exc.job_id)
+        messages.warning(
+            request,
+            'Генерация уже запущена. Показываю текущий прогресс по активной задаче.'
+        )
+        if active_job is not None:
+            return redirect('scheduler:generation_progress', job_id=active_job.job_id)
+        return redirect(redirect_target)
+    finally:
+        GENERATION_LOCK.release()
+
+    messages.success(
+        request,
+        'Генерация запущена. На следующем экране будет виден текущий этап расчета и общий прогресс.'
+    )
+    return redirect('scheduler:generation_progress', job_id=job.job_id)
+
+
+def generation_progress(request: HttpRequest, job_id: str) -> HttpResponse:
+    job = get_generation_job(job_id)
+    if job is None:
+        messages.warning(request, 'Задача генерации не найдена. Возможно, сервер уже перезапускался.')
+        return redirect('scheduler:dashboard')
+    return render(
+        request,
+        'scheduler/generation_progress.html',
+        {
+            'job': job,
+            'job_payload': job.to_payload(),
+            'active_generation_job': get_active_generation_job(),
+        },
+    )
+
+
+def generation_status(request: HttpRequest, job_id: str) -> JsonResponse:
+    job = get_generation_job(job_id)
+    if job is None:
+        return JsonResponse({'detail': 'generation job not found'}, status=404)
+    return JsonResponse(job.to_payload())
+
+
+def generation_events(request: HttpRequest, job_id: str) -> HttpResponse:
+    job = get_generation_job(job_id)
+    if job is None:
+        return JsonResponse({'detail': 'generation job not found'}, status=404)
+
+    def event_stream():
+        current_revision = job.revision
+        initial_payload = json.dumps(job.to_payload(), ensure_ascii=False)
+        yield 'retry: 5000\n'
+        yield f'event: status\ndata: {initial_payload}\n\n'
+        if job.state in {'completed', 'failed', 'cancelled'}:
+            return
+
+        while True:
+            updated_job = wait_for_generation_job_update(
+                job_id,
+                known_revision=current_revision,
+                timeout_seconds=25.0,
+            )
+            if updated_job is None:
+                yield 'event: missing\ndata: {}\n\n'
+                break
+            if updated_job.revision == current_revision:
+                if updated_job.state in {'completed', 'failed', 'cancelled'}:
+                    break
+                yield ': keepalive\n\n'
+                continue
+
+            current_revision = updated_job.revision
+            payload = json.dumps(updated_job.to_payload(), ensure_ascii=False)
+            yield f'event: status\ndata: {payload}\n\n'
+            if updated_job.state in {'completed', 'failed', 'cancelled'}:
+                break
+
+    response = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
+    response['Cache-Control'] = 'no-cache'
+    response['X-Accel-Buffering'] = 'no'
+    return response
+
+
+def _run_generation_job(
+    *,
+    job_id: str,
+    week_start: date,
+    class_ids: list[int],
+    generator_settings: dict[str, int | float],
+    process_lock,
+    manage_db_connections: bool,
+) -> None:
+    if manage_db_connections:
+        close_old_connections()
+    update_generation_job(
+        job_id,
+        state='running',
+        stage='preparing',
+        stage_label='Подготовка данных',
+        message='Запускаем генератор и готовим данные для расчета.',
+        progress_percent=1,
+    )
+    try:
+        generator = GeneticScheduleGenerator(**generator_settings)
+        result = generator.generate(
+            week_start,
+            class_ids=class_ids,
+            progress_callback=lambda stage, stage_label, message, progress_percent: update_generation_job(
+                job_id,
+                state='running',
+                stage=stage,
+                stage_label=stage_label,
+                message=message,
+                progress_percent=progress_percent,
+            ),
+        )
+    except ValidationError:
+        update_generation_job(
+            job_id,
+            state='failed',
+            stage='failed',
+            stage_label='Не удалось построить расписание',
+            message='Ограничения противоречат друг другу. Проверьте доступность учителей и кабинетов.',
+            progress_percent=100,
+            error='validation_error',
+        )
+    except OperationalError as exc:
+        if 'locked' in str(exc).lower():
+            message = 'База данных временно занята. Подождите 10-20 секунд и попробуйте снова.'
+        else:
+            message = 'Во время генерации произошла ошибка базы данных. Попробуйте еще раз.'
+        update_generation_job(
+            job_id,
+            state='failed',
+            stage='failed',
+            stage_label='Ошибка сохранения',
+            message=message,
+            progress_percent=100,
+            error=str(exc),
+        )
+    except Exception as exc:
+        update_generation_job(
+            job_id,
+            state='failed',
+            stage='failed',
+            stage_label='Непредвиденная ошибка',
+            message='Генерация прервалась из-за внутренней ошибки. Детали сохранены в задаче.',
+            progress_percent=100,
+            error=str(exc),
+        )
+    else:
+        summary_message = (
+            f'Готово: создано {result.created_lessons} занятий. '
+            f'Жесткий штраф {result.hard_penalty}, мягкий штраф {result.soft_penalty}.'
+        )
+        update_generation_job(
+            job_id,
+            state='completed',
+            stage='completed',
+            stage_label='Готово',
+            message=summary_message,
+            progress_percent=100,
+            warnings=result.warnings,
+            created_lessons=result.created_lessons,
+            hard_penalty=result.hard_penalty,
+            soft_penalty=result.soft_penalty,
+            diagnostics=result.diagnostics,
+        )
+    finally:
+        if manage_db_connections:
+            close_old_connections()
+        _release_generation_process_lock(process_lock)
+
+
+def _build_generation_result_url(*, week_start: date, class_ids: list[int]) -> str:
+    redirect_url = reverse('scheduler:timetable')
+    if class_ids:
+        return f'{redirect_url}?class_obj={class_ids[0]}&week_start={week_start.isoformat()}'
+    return f'{redirect_url}?week_start={week_start.isoformat()}'
 
 
 def schedule_create(request: HttpRequest) -> HttpResponse:

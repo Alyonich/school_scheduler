@@ -1,14 +1,19 @@
+from __future__ import annotations
+
 import random
+import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Callable, Iterable
 
 from .chromosome import Chromosome, Placement
-from .crossover import crossover
+from .configuration import SchedulerSettings, load_scheduler_settings
+from .csp_solver import CspSeedGenerator
 from .data_loader import GenerationContext, LessonRequirement, load_generation_context
 from .fitness import evaluate_chromosome
-from .mutation import mutate
+from .genetictabler_bridge import GeneticTablerBridge
+from .sanpin_validator import is_pe_subject
 from .saver import persist_schedule
-from .school_rules import alternation_group
 
 
 @dataclass(frozen=True)
@@ -20,25 +25,92 @@ class GenerationResult:
     warnings: list[str]
 
 
+ProgressCallback = Callable[[str, str, str, int], None]
+
+
+@dataclass(frozen=True)
+class SearchProfile:
+    population_size: int
+    generations: int
+    local_search_iterations: int
+    local_search_interval: int
+    local_search_top_count: int
+    hill_domain_scan_limit: int
+    hill_candidate_limit: int
+    max_runtime_seconds: float
+    stagnation_limit: int
+    constructive_attempts: int
+
+
 class GeneticScheduleGenerator:
     def __init__(
         self,
-        population_size: int = 80,
-        generations: int = 160,
-        mutation_rate: float = 0.18,
+        population_size: int | None = None,
+        generations: int | None = None,
+        mutation_rate: float | None = None,
+        crossover_rate: float | None = None,
+        elitism_count: int | None = None,
+        local_search_iterations: int | None = None,
+        config_path: str | None = None,
         seed: int | None = None,
     ) -> None:
-        self.population_size = population_size
-        self.generations = generations
-        self.mutation_rate = mutation_rate
+        base_settings = load_scheduler_settings(config_path)
+        ga_settings = base_settings.algorithm.ga
+        overridden_ga = replace(
+            ga_settings,
+            population_size=population_size if population_size is not None else ga_settings.population_size,
+            generations=generations if generations is not None else ga_settings.generations,
+            mutation_rate=mutation_rate if mutation_rate is not None else ga_settings.mutation_rate,
+            crossover_rate=crossover_rate if crossover_rate is not None else ga_settings.crossover_rate,
+            elitism_count=elitism_count if elitism_count is not None else ga_settings.elitism_count,
+            local_search_iterations=(
+                local_search_iterations
+                if local_search_iterations is not None
+                else ga_settings.local_search_iterations
+            ),
+        )
+        self.settings = replace(
+            base_settings,
+            algorithm=replace(base_settings.algorithm, ga=overridden_ga),
+        )
         self.randomizer = random.Random(seed)
 
-    def generate(self, week_start, class_ids: list[int] | None = None) -> GenerationResult:
-        return self._generate_resilient(week_start=week_start, class_ids=class_ids)
-
-    def _generate_resilient(self, week_start, class_ids: list[int] | None = None) -> GenerationResult:
-        context = load_generation_context(week_start=week_start, class_ids=class_ids)
+    def generate(
+        self,
+        week_start,
+        class_ids: list[int] | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> GenerationResult:
+        self._emit_progress(
+            progress_callback,
+            stage='preparing',
+            stage_label='Подготовка данных',
+            message='Собираем учебную нагрузку, кабинеты и доступность преподавателей.',
+            progress_percent=3,
+        )
+        context = load_generation_context(
+            week_start=week_start,
+            class_ids=class_ids,
+            settings=self.settings,
+        )
+        self._emit_progress(
+            progress_callback,
+            stage='preparing',
+            stage_label='Подготовка данных',
+            message=(
+                f'Подготовлено {len(context.lesson_requirements)} уроков '
+                f'для {len(context.class_ids)} классов. Переходим к поиску допустимых вариантов.'
+            ),
+            progress_percent=10,
+        )
         if not context.lesson_requirements:
+            self._emit_progress(
+                progress_callback,
+                stage='completed',
+                stage_label='Готово',
+                message='Для выбранной недели нет уроков, которые нужно пересчитывать.',
+                progress_percent=100,
+            )
             return GenerationResult(
                 created_lessons=0,
                 hard_penalty=0,
@@ -47,280 +119,1014 @@ class GeneticScheduleGenerator:
                 warnings=context.warnings or ['Для выбранных условий нет занятий, которые нужно сгенерировать.'],
             )
 
-        room_choices = self._build_room_choices(context)
-        population = [self._create_initial_chromosome(context, room_choices) for _ in range(self.population_size)]
+        best, warnings = self._optimize(context, progress_callback=progress_callback)
+        self._emit_progress(
+            progress_callback,
+            stage='postprocessing',
+            stage_label='Финальная проверка',
+            message='Проверяем результат по СанПиН и при необходимости доулучшаем расписание.',
+            progress_percent=90,
+        )
+        best, post_warnings = self._postprocess(context, best, progress_callback=progress_callback)
+        warnings.extend(post_warnings)
+
+        self._emit_progress(
+            progress_callback,
+            stage='saving',
+            stage_label='Сохранение результата',
+            message='Сохраняем итоговое расписание в базу данных.',
+            progress_percent=97,
+        )
+        created_lessons, skipped_lessons = persist_schedule(best, context)
+        if best.hard_penalty > 0:
+            warnings.append(
+                'В расписании остались жесткие конфликты; проверьте доступность преподавателей, кабинетов и недельную нагрузку.'
+            )
+        if skipped_lessons:
+            warnings.append(
+                f'Не удалось разместить {skipped_lessons} занятий из-за конфликтующих ограничений.'
+            )
+        result_message = (
+            f'Готово: создано {created_lessons} занятий. '
+            f'Жесткий штраф {best.hard_penalty}, мягкий штраф {best.soft_penalty}.'
+        )
+        if skipped_lessons:
+            result_message += f' Не удалось разместить {skipped_lessons} занятий.'
+        self._emit_progress(
+            progress_callback,
+            stage='completed',
+            stage_label='Готово',
+            message=result_message,
+            progress_percent=100,
+        )
+
+        return GenerationResult(
+            created_lessons=created_lessons,
+            hard_penalty=best.hard_penalty,
+            soft_penalty=best.soft_penalty,
+            diagnostics=best.diagnostics,
+            warnings=warnings,
+        )
+
+    def _optimize(
+        self,
+        context: GenerationContext,
+        seed_population: list[Chromosome] | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> tuple[Chromosome, list[str]]:
+        profile = self._build_search_profile(context)
+        self._emit_progress(
+            progress_callback,
+            stage='csp',
+            stage_label='Проверка ограничений',
+            message='Строим допустимые домены и стартовые решения без конфликтов.',
+            progress_percent=14,
+        )
+        csp_result = CspSeedGenerator(context).build(
+            limit=max(2, int(profile.population_size * context.settings.algorithm.ga.csp_seed_fraction))
+        )
+        warnings = list(context.warnings) + list(csp_result.warnings)
+        candidate_domains = csp_result.candidate_domains
+        bridge = GeneticTablerBridge(context, self.randomizer)
+
+        self._emit_progress(
+            progress_callback,
+            stage='population',
+            stage_label='Стартовая популяция',
+            message='Собираем начальные варианты расписания для генетического алгоритма.',
+            progress_percent=24,
+        )
+        population = self._build_initial_population(
+            context=context,
+            candidate_domains=candidate_domains,
+            bridge=bridge,
+            csp_seed_solutions=csp_result.seed_solutions,
+            seed_population=seed_population or [],
+            population_size=profile.population_size,
+            constructive_attempts=profile.constructive_attempts,
+        )
         population.sort(key=self._chromosome_sort_key)
         best = population[0].copy()
+
+        ga_settings = context.settings.algorithm.ga
+        started_at = time.perf_counter()
         stagnation = 0
-        min_generations = max(20, self.generations // 5)
-        reheat_interval = max(10, self.generations // 10)
-        soft_target = max(45, len(context.lesson_requirements) // 3)
-
-        for generation_index in range(self.generations):
-            population.sort(key=self._chromosome_sort_key)
-            elite_count = max(2, self.population_size // 8)
-            next_population = [item.copy() for item in population[:elite_count]]
-            adaptive_mutation_rate = self._adaptive_mutation_rate(
-                generation_index=generation_index,
-                best=best,
-                stagnation=stagnation,
+        for generation_index in range(profile.generations):
+            if time.perf_counter() - started_at >= profile.max_runtime_seconds:
+                warnings.append('GA search stopped after reaching the interactive runtime budget.')
+                break
+            generation_number = generation_index + 1
+            self._emit_progress(
+                progress_callback,
+                stage='evolution',
+                stage_label='Генетический поиск',
+                message=(
+                    f'Поколение {generation_number} из {profile.generations}: '
+                    'скрещиваем варианты и вносим мутации.'
+                ),
+                progress_percent=self._generation_progress_percent(generation_number, profile.generations, 32, 76),
             )
+            population.sort(key=self._chromosome_sort_key)
+            elite_count = min(max(2, ga_settings.elitism_count), len(population))
+            next_population = [item.copy() for item in population[:elite_count]]
 
-            while len(next_population) < self.population_size:
+            while len(next_population) < profile.population_size:
                 parent_a = self._select(population)
                 parent_b = self._select(population)
-                child = crossover(parent_a, parent_b, self.randomizer)
-                child = mutate(
+                child = self._crossover(
+                    parent_a=parent_a,
+                    parent_b=parent_b,
+                    context=context,
+                    candidate_domains=candidate_domains,
+                    bridge=bridge,
+                )
+                child = self._mutate(
                     chromosome=child,
                     context=context,
-                    mutation_rate=adaptive_mutation_rate,
-                    randomizer=self.randomizer,
-                    room_choices=room_choices,
+                    candidate_domains=candidate_domains,
+                    bridge=bridge,
+                    mutation_rate=ga_settings.mutation_rate,
+                    smart=generation_index >= profile.generations // 2,
                 )
                 evaluate_chromosome(child, context)
                 next_population.append(child)
 
             population = next_population
             population.sort(key=self._chromosome_sort_key)
-            current_best = population[0]
-            if self._is_better(current_best, best):
-                best = current_best.copy()
+            improved = self._is_better(population[0], best)
+            if improved:
+                best = population[0].copy()
                 stagnation = 0
             else:
                 stagnation += 1
 
-            should_reheat = (
-                stagnation >= reheat_interval
-                and generation_index < self.generations - 1
-                and (best.hard_penalty > 0 or best.soft_penalty > soft_target)
+            self._emit_progress(
+                progress_callback,
+                stage='local_search',
+                stage_label='Локальное улучшение',
+                message=(
+                    f'Поколение {generation_number} из {ga_settings.generations}: '
+                    'дошлифовываем лучшие варианты, убираем окна и перегрузки.'
+                ),
+                progress_percent=self._generation_progress_percent(generation_number, ga_settings.generations, 38, 84),
             )
-            if should_reheat:
-                population = self._inject_diversity(
-                    population=population,
-                    context=context,
-                    room_choices=room_choices,
-                    mutation_rate=min(0.95, adaptive_mutation_rate + 0.12),
-                )
-                population.sort(key=self._chromosome_sort_key)
-                reheated_best = population[0]
-                if self._is_better(reheated_best, best):
-                    best = reheated_best.copy()
-                    stagnation = 0
-                else:
-                    stagnation = max(0, stagnation // 2)
-
-            should_stop = (
-                generation_index >= min_generations
-                and best.hard_penalty == 0
-                and best.soft_penalty <= soft_target
-                and stagnation >= max(4, reheat_interval // 2)
+            population = self._apply_local_search(
+                population=population,
+                context=context,
+                candidate_domains=candidate_domains,
+                bridge=bridge,
             )
-            if should_stop:
-                break
+            population.sort(key=self._chromosome_sort_key)
+            if self._is_better(population[0], best):
+                best = population[0].copy()
+                stagnation = 0
 
-        repaired = self._repair(best, context, room_choices)
-        created_lessons, skipped_lessons = persist_schedule(repaired, context)
-        warnings = list(context.warnings)
-        if repaired.hard_penalty > 0:
-            warnings.append('В расписании остались жёсткие конфликты, часть ограничений не удалось полностью удовлетворить.')
-        if skipped_lessons:
-            warnings.append(
-                f'Не удалось разместить {skipped_lessons} занятий из-за конфликтующих ограничений. '
-                'Проверьте доступность преподавателей, кабинетов и недельную нагрузку классов.'
-            )
+            if best.hard_penalty == 0 and stagnation >= profile.stagnation_limit:
+                minimum_generations = max(6, profile.generations // 3)
+                if generation_number >= minimum_generations:
+                    break
 
-        return GenerationResult(
-            created_lessons=created_lessons,
-            hard_penalty=repaired.hard_penalty,
-            soft_penalty=repaired.soft_penalty,
-            diagnostics=repaired.diagnostics,
-            warnings=warnings,
+        self._emit_progress(
+            progress_callback,
+            stage='repair',
+            stage_label='Финальное улучшение',
+            message='Точечно улучшаем лучший найденный вариант перед сохранением.',
+            progress_percent=87,
         )
+        repaired = self._hill_climb(
+            chromosome=best,
+            context=context,
+            candidate_domains=candidate_domains,
+            iterations=profile.local_search_iterations,
+            bridge=bridge,
+            domain_scan_limit=profile.hill_domain_scan_limit,
+            candidate_slot_limit=profile.hill_candidate_limit,
+        )
+        repaired = self._compact_daily_starts(
+            chromosome=repaired,
+            context=context,
+            candidate_domains=candidate_domains,
+        )
+        evaluate_chromosome(repaired, context)
+        return repaired, warnings
+
+    def _build_search_profile(self, context: GenerationContext) -> SearchProfile:
+        ga_settings = context.settings.algorithm.ga
+        lesson_count = len(context.lesson_requirements)
+        class_count = max(1, len(context.class_ids))
+
+        if lesson_count <= 24:
+            population_cap = 18 + min(8, class_count * 2)
+            generations_cap = 12 + min(8, class_count * 2)
+            local_search_iterations = 1
+            local_search_top_count = 1
+            hill_domain_scan_limit = 4
+            hill_candidate_limit = 3
+            max_runtime_seconds = 8.0 + class_count * 1.5
+            stagnation_limit = 3
+            constructive_attempts = 12
+        elif lesson_count <= 48:
+            population_cap = 24 + min(8, class_count * 2)
+            generations_cap = 16 + min(8, class_count * 2)
+            local_search_iterations = 1
+            local_search_top_count = 1
+            hill_domain_scan_limit = 4
+            hill_candidate_limit = 3
+            max_runtime_seconds = 12.0 + class_count * 1.5
+            stagnation_limit = 4
+            constructive_attempts = 10
+        elif lesson_count <= 84:
+            population_cap = 28 + min(8, class_count * 2)
+            generations_cap = 20 + min(8, class_count * 2)
+            local_search_iterations = 1
+            local_search_top_count = 2
+            hill_domain_scan_limit = 4
+            hill_candidate_limit = 3
+            max_runtime_seconds = 16.0 + class_count * 1.5
+            stagnation_limit = 4
+            constructive_attempts = 8
+        else:
+            population_cap = 28 + min(6, class_count)
+            generations_cap = 18 + min(6, class_count)
+            local_search_iterations = 1
+            local_search_top_count = 2
+            hill_domain_scan_limit = 3
+            hill_candidate_limit = 2
+            max_runtime_seconds = 14.0 + class_count
+            stagnation_limit = 5
+            constructive_attempts = 6
+
+        return SearchProfile(
+            population_size=max(12, min(ga_settings.population_size, population_cap)),
+            generations=max(8, min(ga_settings.generations, generations_cap)),
+            local_search_iterations=max(1, min(ga_settings.local_search_iterations, local_search_iterations)),
+            local_search_interval=1,
+            local_search_top_count=max(1, local_search_top_count),
+            hill_domain_scan_limit=max(2, hill_domain_scan_limit),
+            hill_candidate_limit=max(2, hill_candidate_limit),
+            max_runtime_seconds=max(6.0, max_runtime_seconds),
+            stagnation_limit=max(2, stagnation_limit),
+            constructive_attempts=max(4, constructive_attempts),
+        )
+
+    def _build_initial_population(
+        self,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        bridge: GeneticTablerBridge,
+        csp_seed_solutions: list[dict[str, tuple[int, int]]],
+        seed_population: list[Chromosome],
+        population_size: int | None = None,
+        constructive_attempts: int = 8,
+    ) -> list[Chromosome]:
+        population: list[Chromosome] = []
+        for chromosome in seed_population:
+            population.append(evaluate_chromosome(chromosome.copy(), context))
+
+        target_population = population_size or context.settings.algorithm.ga.population_size
+        target_csp = max(
+            1,
+            int(target_population * context.settings.algorithm.ga.csp_seed_fraction),
+        )
+
+        for solution in csp_seed_solutions[:target_csp]:
+            chromosome = self._chromosome_from_solution(context, solution)
+            population.append(evaluate_chromosome(chromosome, context))
+
+        for _ in range(max(2, constructive_attempts)):
+            if len(population) >= min(target_population, target_csp):
+                break
+            chromosome = self._construct_feasible_chromosome(
+                context=context,
+                candidate_domains=candidate_domains,
+                bridge=bridge,
+                random_only=False,
+            )
+            if chromosome is not None:
+                population.append(chromosome)
+
+        while len(population) < min(target_population, target_csp):
+            chromosome = self._create_initial_chromosome(
+                context=context,
+                candidate_domains=candidate_domains,
+                bridge=bridge,
+            )
+            population.append(chromosome)
+
+        while len(population) < target_population:
+            chromosome = self._construct_feasible_chromosome(
+                context=context,
+                candidate_domains=candidate_domains,
+                bridge=bridge,
+                random_only=True,
+            )
+            if chromosome is None:
+                chromosome = self._create_initial_chromosome(
+                    context=context,
+                    candidate_domains=candidate_domains,
+                    bridge=bridge,
+                    random_only=True,
+                )
+            population.append(chromosome)
+        return population
+
+    def _chromosome_from_solution(
+        self,
+        context: GenerationContext,
+        solution: dict[str, tuple[int, int]],
+    ) -> Chromosome:
+        placements = [
+            Placement(*solution[requirement.lesson_id])
+            for requirement in context.lesson_requirements
+        ]
+        return Chromosome(placements=placements)
 
     def _create_initial_chromosome(
         self,
         context: GenerationContext,
-        room_choices: dict[str, list[int]],
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        bridge: GeneticTablerBridge,
+        random_only: bool = False,
     ) -> Chromosome:
-        placements: list[Placement] = []
-        used_class: set[tuple[int, int, int]] = set()
-        used_teacher: set[tuple[int, int, int]] = set()
-        used_room: set[tuple[int, int, int]] = set()
-        subject_daily: dict[tuple[int, int, int], int] = {}
-        class_daily_numbers: dict[tuple[int, int], list[int]] = defaultdict(list)
-        teacher_daily_numbers: dict[tuple[int, int], list[int]] = defaultdict(list)
-        class_daily_counts: dict[tuple[int, int], int] = defaultdict(int)
-        teacher_daily_counts: dict[tuple[int, int], int] = defaultdict(int)
-        class_daily_lessons: dict[tuple[int, int], list[tuple[int, str, str]]] = defaultdict(list)
-        slot_lookup = {slot.id: slot for slot in context.time_slots}
-        slot_ids = [slot.id for slot in sorted(context.time_slots, key=lambda item: (item.lesson_number, item.weekday))]
-
-        for fixed in context.fixed_lessons:
-            weekday = fixed.lesson_date.isoweekday()
-            fixed_slot = slot_lookup.get(fixed.time_slot_id)
-            if fixed_slot is None:
-                continue
-
-            used_class.add((fixed.class_id, weekday, fixed.time_slot_id))
-            used_teacher.add((fixed.teacher_id, weekday, fixed.time_slot_id))
-            used_room.add((fixed.classroom_id, weekday, fixed.time_slot_id))
-            subject_daily[(fixed.class_id, fixed.subject_id, weekday)] = (
-                subject_daily.get((fixed.class_id, fixed.subject_id, weekday), 0) + 1
-            )
-            class_daily_numbers[(fixed.class_id, weekday)].append(fixed_slot.lesson_number)
-            teacher_daily_numbers[(fixed.teacher_id, weekday)].append(fixed_slot.lesson_number)
-            class_daily_counts[(fixed.class_id, weekday)] += 1
-            teacher_daily_counts[(fixed.teacher_id, weekday)] += 1
-            class_daily_lessons[(fixed.class_id, weekday)].append(
-                (fixed_slot.lesson_number, fixed.subject_name, fixed.required_room_type)
-            )
-
-        requirements = sorted(
-            context.lesson_requirements,
+        state = self._initialize_usage_state(context)
+        placement_map: dict[int, Placement] = {}
+        ordered_requirements = sorted(
+            enumerate(context.lesson_requirements),
             key=lambda item: (
-                len(self._candidate_rooms_for_requirement(item, context, room_choices)) or 999,
-                item.daily_limit,
+                len(candidate_domains.get(item[1].lesson_id, [])),
+                -item[1].difficulty_score,
+                item[1].class_id,
             ),
         )
 
-        original_positions = {requirement.lesson_id: index for index, requirement in enumerate(context.lesson_requirements)}
-        placement_map = {}
-
-        for requirement in requirements:
-            slot_id, room_id = self._pick_best_position(
+        for original_index, requirement in ordered_requirements:
+            preferred_slots = []
+            if random_only:
+                preferred_slots.extend(bridge.random_slot_population(requirement, size=5))
+            else:
+                preferred_slot = bridge.random_slot_id()
+                preferred_slots.append(preferred_slot)
+                preferred_slots.append(bridge.mutate_slot(requirement, preferred_slot, smart=False))
+            placement = self._pick_best_position(
                 requirement=requirement,
                 context=context,
-                room_choices=room_choices,
-                slot_ids=slot_ids,
-                slot_lookup=slot_lookup,
-                used_class=used_class,
-                used_teacher=used_teacher,
-                used_room=used_room,
-                subject_daily=subject_daily,
-                class_daily_numbers=class_daily_numbers,
-                teacher_daily_numbers=teacher_daily_numbers,
-                class_daily_counts=class_daily_counts,
-                teacher_daily_counts=teacher_daily_counts,
-                class_daily_lessons=class_daily_lessons,
+                candidate_domains=candidate_domains,
+                preferred_slots=preferred_slots,
+                state=state,
             )
-            slot = slot_lookup[slot_id]
-            used_class.add((requirement.class_id, slot.weekday, slot_id))
-            used_teacher.add((requirement.teacher_id, slot.weekday, slot_id))
-            used_room.add((room_id, slot.weekday, slot_id))
-            subject_daily[(requirement.class_id, requirement.subject_id, slot.weekday)] = (
-                subject_daily.get((requirement.class_id, requirement.subject_id, slot.weekday), 0) + 1
-            )
-            class_daily_numbers[(requirement.class_id, slot.weekday)].append(slot.lesson_number)
-            teacher_daily_numbers[(requirement.teacher_id, slot.weekday)].append(slot.lesson_number)
-            class_daily_counts[(requirement.class_id, slot.weekday)] += 1
-            teacher_daily_counts[(requirement.teacher_id, slot.weekday)] += 1
-            class_daily_lessons[(requirement.class_id, slot.weekday)].append(
-                (slot.lesson_number, requirement.subject_name, requirement.required_room_type)
-            )
-            placement_map[original_positions[requirement.lesson_id]] = Placement(slot_id, room_id)
+            placement_map[original_index] = placement
+            self._apply_usage_state(state, requirement, placement)
 
-        for index in range(len(context.lesson_requirements)):
-            placements.append(placement_map[index])
-
+        placements = [placement_map[index] for index in range(len(context.lesson_requirements))]
         chromosome = Chromosome(placements=placements)
         return evaluate_chromosome(chromosome, context)
+
+    def _construct_feasible_chromosome(
+        self,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        bridge: GeneticTablerBridge,
+        random_only: bool,
+        attempts: int = 6,
+    ) -> Chromosome | None:
+        base_order = sorted(
+            enumerate(context.lesson_requirements),
+            key=lambda item: (
+                len(candidate_domains.get(item[1].lesson_id, [])),
+                -item[1].difficulty_score,
+                item[1].class_id,
+                item[1].teacher_id,
+            ),
+        )
+        for attempt_index in range(max(1, attempts)):
+            state = self._initialize_usage_state(context)
+            placement_map: dict[int, Placement] = {}
+            ordered_requirements = list(base_order)
+            if attempt_index:
+                ordered_requirements.sort(
+                    key=lambda item: (
+                        len(candidate_domains.get(item[1].lesson_id, [])),
+                        -item[1].difficulty_score,
+                        self.randomizer.random(),
+                    ),
+                )
+
+            success = True
+            for original_index, requirement in ordered_requirements:
+                preferred_slots: list[int] = []
+                if random_only:
+                    preferred_slots.extend(bridge.random_slot_population(requirement, size=3))
+                else:
+                    preferred_slot = bridge.random_slot_id()
+                    preferred_slots.append(preferred_slot)
+                    preferred_slots.append(bridge.mutate_slot(requirement, preferred_slot, smart=False))
+
+                placement = self._pick_feasible_position(
+                    requirement=requirement,
+                    context=context,
+                    candidate_domains=candidate_domains,
+                    preferred_slots=preferred_slots,
+                    state=state,
+                )
+                if placement is None:
+                    success = False
+                    break
+                placement_map[original_index] = placement
+                self._apply_usage_state(state, requirement, placement)
+
+            if not success:
+                continue
+
+            placements = [placement_map[index] for index in range(len(context.lesson_requirements))]
+            return evaluate_chromosome(Chromosome(placements=placements), context)
+        return None
+
+    def _pick_feasible_position(
+        self,
+        requirement: LessonRequirement,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        preferred_slots: Iterable[int],
+        state: dict[str, object],
+    ) -> Placement | None:
+        candidates = list(candidate_domains.get(requirement.lesson_id, []))
+        if not candidates:
+            candidates = [
+                (slot.id, room_id)
+                for slot in context.time_slots
+                for room_id, room in context.classrooms.items()
+                if room.capacity >= requirement.min_capacity
+            ]
+
+        preferred_order = {slot_id: index for index, slot_id in enumerate(dict.fromkeys(preferred_slots))}
+        candidates.sort(
+            key=lambda item: (
+                self._placement_cost(requirement, Placement(*item), context, state),
+                preferred_order.get(item[0], 999),
+                self.randomizer.random(),
+            )
+        )
+        for slot_id, room_id in candidates:
+            placement = Placement(slot_id, room_id)
+            if self._is_hard_feasible(requirement, placement, context, state):
+                return placement
+        return None
 
     def _pick_best_position(
         self,
         requirement: LessonRequirement,
         context: GenerationContext,
-        room_choices: dict[str, list[int]],
-        slot_ids: list[int],
-        slot_lookup: dict[int, object],
-        used_class: set[tuple[int, int, int]],
-        used_teacher: set[tuple[int, int, int]],
-        used_room: set[tuple[int, int, int]],
-        subject_daily: dict[tuple[int, int, int], int],
-        class_daily_numbers: dict[tuple[int, int], list[int]],
-        teacher_daily_numbers: dict[tuple[int, int], list[int]],
-        class_daily_counts: dict[tuple[int, int], int],
-        teacher_daily_counts: dict[tuple[int, int], int],
-        class_daily_lessons: dict[tuple[int, int], list[tuple[int, str, str]]],
-    ) -> tuple[int, int]:
-        candidate_rooms = self._candidate_rooms_for_requirement(requirement, context, room_choices)
-        candidate_rooms = candidate_rooms[:]
-        self.randomizer.shuffle(candidate_rooms)
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        preferred_slots: Iterable[int],
+        state: dict[str, object],
+    ) -> Placement:
+        candidates = list(candidate_domains.get(requirement.lesson_id, []))
+        if not candidates:
+            candidates = [
+                (slot.id, room_id)
+                for slot in context.time_slots
+                for room_id, room in context.classrooms.items()
+                if room.capacity >= requirement.min_capacity
+            ]
 
-        best_option = None
-        best_score = None
-
-        for slot_id in slot_ids:
-            slot = slot_lookup[slot_id]
-            weekday = slot.weekday
-            score = self.randomizer.random()
-            if (requirement.teacher_id, slot_id) in context.teacher_unavailability:
-                score += 70
-            if (requirement.class_id, weekday, slot_id) in used_class:
-                score += 130
-            if (requirement.teacher_id, weekday, slot_id) in used_teacher:
-                score += 130
-            if subject_daily.get((requirement.class_id, requirement.subject_id, weekday), 0) >= requirement.daily_limit:
-                score += 80
-
-            projected_teacher_daily = teacher_daily_counts.get((requirement.teacher_id, weekday), 0) + 1
-            if projected_teacher_daily > requirement.teacher_daily_limit:
-                score += (projected_teacher_daily - requirement.teacher_daily_limit) * 55
-
-            projected_class_daily = class_daily_counts.get((requirement.class_id, weekday), 0) + 1
-            class_daily_limit = requirement.class_daily_limit
-            if requirement.class_grade <= 4 and requirement.is_pe_lesson:
-                class_daily_limit += 1
-            if projected_class_daily > class_daily_limit:
-                score += (projected_class_daily - class_daily_limit) * 150
-
-            target_daily = context.class_daily_targets.get(requirement.class_id, 0)
-            score += int(abs(projected_class_daily - target_daily) * 8)
-            if projected_class_daily > int(target_daily) + 1:
-                score += (projected_class_daily - (int(target_daily) + 1)) * 30
-
-            score += self._start_and_gap_penalty(
-                slot.lesson_number,
-                class_daily_numbers.get((requirement.class_id, weekday), []),
-                weight_late_start=36,
-                weight_gap=58,
+        preferred_order = {slot_id: index for index, slot_id in enumerate(dict.fromkeys(preferred_slots))}
+        candidates.sort(
+            key=lambda item: (
+                self._placement_cost(requirement, Placement(*item), context, state),
+                preferred_order.get(item[0], 999),
+                self.randomizer.random(),
             )
-            score += self._start_and_gap_penalty(
-                slot.lesson_number,
-                teacher_daily_numbers.get((requirement.teacher_id, weekday), []),
-                weight_late_start=10,
-                weight_gap=22,
-            )
-            score += self._alternation_penalty(
-                lesson_number=slot.lesson_number,
-                subject_group=requirement.alternation_group,
-                class_grade=requirement.class_grade,
-                existing_lessons=class_daily_lessons.get((requirement.class_id, weekday), []),
-            )
-            score += self._double_lesson_penalty(
-                lesson_number=slot.lesson_number,
-                subject_name=requirement.subject_name,
-                allows_double_lesson=requirement.allows_double_lesson,
-                existing_lessons=class_daily_lessons.get((requirement.class_id, weekday), []),
-            )
-            score += self._difficulty_weekday_penalty(
-                weekday=weekday,
-                is_hard_subject=requirement.is_hard_subject,
-            )
+        )
+        best_slot_id, best_room_id = candidates[0]
+        return Placement(best_slot_id, best_room_id)
 
-            for room_id in candidate_rooms:
-                room_score = score
-                if (room_id, weekday, slot_id) in used_room:
-                    room_score += 130
-                room = context.classrooms[room_id]
-                if room.room_type != requirement.required_room_type:
-                    room_score += 35
-                if best_score is None or room_score < best_score:
-                    best_score = room_score
-                    best_option = (slot_id, room_id)
+    def _is_hard_feasible(
+        self,
+        requirement: LessonRequirement,
+        placement: Placement,
+        context: GenerationContext,
+        state: dict[str, object],
+    ) -> bool:
+        slot_lookup = state['slot_lookup']
+        slot = slot_lookup[placement.time_slot_id]
+        room = context.classrooms[placement.classroom_id]
+        weekday = slot.weekday
 
-        if best_option is None:
-            return context.time_slots[0].id, next(iter(context.classrooms.keys()))
-        return best_option
+        if (requirement.class_id, weekday, placement.time_slot_id) in state['used_class']:
+            return False
+        if (requirement.teacher_id, weekday, placement.time_slot_id) in state['used_teacher']:
+            return False
+        if (placement.classroom_id, weekday, placement.time_slot_id) in state['used_room']:
+            return False
+        if (requirement.teacher_id, placement.time_slot_id) in context.teacher_unavailability:
+            return False
+        if room.room_type != requirement.required_room_type:
+            return False
+        if room.capacity < requirement.min_capacity:
+            return False
+
+        projected_subject_count = state['subject_daily'].get((requirement.class_id, requirement.subject_id, weekday), 0) + 1
+        if projected_subject_count > requirement.daily_limit:
+            return False
+
+        projected_teacher_daily = state['teacher_daily_counts'].get((requirement.teacher_id, weekday), 0) + 1
+        if projected_teacher_daily > requirement.teacher_daily_limit:
+            return False
+
+        day_has_pe = state['class_day_has_pe'].get((requirement.class_id, weekday), False) or requirement.is_pe_lesson
+        projected_class_daily = state['class_daily_counts'].get((requirement.class_id, weekday), 0) + 1
+        class_daily_limit = context.sanpin_validator.daily_lesson_limit(requirement.class_grade, pe_bonus=day_has_pe)
+        if projected_class_daily > class_daily_limit:
+            return False
+
+        if context.settings.sanpin.enable_score_caps:
+            projected_daily_score = state['class_daily_scores'].get((requirement.class_id, weekday), 0) + requirement.difficulty_score
+            if projected_daily_score > context.sanpin_validator.daily_score_limit(requirement.class_grade):
+                return False
+
+            projected_weekly_score = state['class_weekly_scores'].get(requirement.class_id, 0) + requirement.difficulty_score
+            if projected_weekly_score > context.sanpin_validator.weekly_score_limit(requirement.class_grade):
+                return False
+
+        return True
+
+    def _placement_cost(
+        self,
+        requirement: LessonRequirement,
+        placement: Placement,
+        context: GenerationContext,
+        state: dict[str, object],
+    ) -> int:
+        slot_lookup = state['slot_lookup']
+        last_lesson_by_weekday = state['last_lesson_by_weekday']
+        slot = slot_lookup[placement.time_slot_id]
+        room = context.classrooms[placement.classroom_id]
+        weekday = slot.weekday
+
+        used_class = state['used_class']
+        used_teacher = state['used_teacher']
+        used_room = state['used_room']
+        subject_daily = state['subject_daily']
+        class_daily_counts = state['class_daily_counts']
+        teacher_daily_counts = state['teacher_daily_counts']
+        class_daily_numbers = state['class_daily_numbers']
+        teacher_daily_numbers = state['teacher_daily_numbers']
+        class_daily_lessons = state['class_daily_lessons']
+        class_daily_scores = state['class_daily_scores']
+        class_weekly_scores = state['class_weekly_scores']
+        class_day_has_pe = state['class_day_has_pe']
+
+        cost = 0
+        if (requirement.class_id, weekday, placement.time_slot_id) in used_class:
+            cost += 2400
+        if (requirement.teacher_id, weekday, placement.time_slot_id) in used_teacher:
+            cost += 2400
+        if (placement.classroom_id, weekday, placement.time_slot_id) in used_room:
+            cost += 2400
+        if (requirement.teacher_id, placement.time_slot_id) in context.teacher_unavailability:
+            cost += 2200
+        if room.room_type != requirement.required_room_type:
+            cost += 2000
+        if room.capacity < requirement.min_capacity:
+            cost += 2000
+
+        projected_subject_count = subject_daily.get((requirement.class_id, requirement.subject_id, weekday), 0) + 1
+        if projected_subject_count > requirement.daily_limit:
+            cost += (projected_subject_count - requirement.daily_limit) * 1500
+
+        projected_teacher_daily = teacher_daily_counts.get((requirement.teacher_id, weekday), 0) + 1
+        if projected_teacher_daily > requirement.teacher_daily_limit:
+            cost += (projected_teacher_daily - requirement.teacher_daily_limit) * 1200
+
+        day_has_pe = class_day_has_pe.get((requirement.class_id, weekday), False) or requirement.is_pe_lesson
+        projected_class_daily = class_daily_counts.get((requirement.class_id, weekday), 0) + 1
+        class_daily_limit = context.sanpin_validator.daily_lesson_limit(requirement.class_grade, pe_bonus=day_has_pe)
+        if projected_class_daily > class_daily_limit:
+            cost += (projected_class_daily - class_daily_limit) * 1600
+
+        projected_daily_score = class_daily_scores.get((requirement.class_id, weekday), 0) + requirement.difficulty_score
+        if context.settings.sanpin.enable_score_caps:
+            daily_score_limit = context.sanpin_validator.daily_score_limit(requirement.class_grade)
+            if projected_daily_score > daily_score_limit:
+                cost += (projected_daily_score - daily_score_limit) * 200
+
+            projected_weekly_score = class_weekly_scores.get(requirement.class_id, 0) + requirement.difficulty_score
+            weekly_score_limit = context.sanpin_validator.weekly_score_limit(requirement.class_grade)
+            if projected_weekly_score > weekly_score_limit:
+                cost += (projected_weekly_score - weekly_score_limit) * 120
+
+        cost += self._start_and_gap_penalty(
+            slot.lesson_number,
+            class_daily_numbers.get((requirement.class_id, weekday), []),
+            weight_late_start=80,
+            weight_gap=45,
+        )
+        cost += self._start_and_gap_penalty(
+            slot.lesson_number,
+            teacher_daily_numbers.get((requirement.teacher_id, weekday), []),
+            weight_late_start=20,
+            weight_gap=18,
+        )
+        cost += self._alternation_penalty(
+            lesson_number=slot.lesson_number,
+            subject_group=requirement.alternation_group,
+            class_grade=requirement.class_grade,
+            existing_lessons=class_daily_lessons.get((requirement.class_id, weekday), []),
+        )
+        cost += self._double_lesson_penalty(
+            lesson_number=slot.lesson_number,
+            subject_name=requirement.subject_name,
+            allows_double_lesson=requirement.allows_double_lesson,
+            existing_lessons=class_daily_lessons.get((requirement.class_id, weekday), []),
+        )
+        if requirement.teacher_preferences.avoid_first_lesson and slot.lesson_number == 1:
+            cost += 90
+        if requirement.teacher_preferences.avoid_last_lesson and slot.lesson_number == max(
+            1,
+            last_lesson_by_weekday.get(weekday, context.settings.school.max_lessons_per_day),
+        ):
+            cost += 90
+        if requirement.is_hard_subject and slot.lesson_number in {
+            1,
+            max(1, last_lesson_by_weekday.get(weekday, context.settings.school.max_lessons_per_day)),
+        }:
+            cost += 80
+        if requirement.is_hard_subject and weekday in {2, 3}:
+            cost -= 12
+        return cost
+
+    def _crossover(
+        self,
+        parent_a: Chromosome,
+        parent_b: Chromosome,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        bridge: GeneticTablerBridge,
+    ) -> Chromosome:
+        placements: list[Placement] = []
+        for requirement, placement_a, placement_b in zip(
+            context.lesson_requirements,
+            parent_a.placements,
+            parent_b.placements,
+        ):
+            if self.randomizer.random() > context.settings.algorithm.ga.crossover_rate:
+                placements.append(placement_a if self.randomizer.random() < 0.5 else placement_b)
+                continue
+
+            slot_id = bridge.crossover_slot(
+                requirement,
+                placement_a.time_slot_id,
+                placement_b.time_slot_id,
+                use_uniform=self.randomizer.random() < 0.2,
+            )
+            room_id = self._pick_room_for_slot(
+                requirement=requirement,
+                slot_id=slot_id,
+                current_room_id=placement_a.classroom_id if self.randomizer.random() < 0.5 else placement_b.classroom_id,
+                candidate_domains=candidate_domains,
+                context=context,
+            )
+            placements.append(Placement(slot_id, room_id))
+
+        return Chromosome(placements=placements)
+
+    def _mutate(
+        self,
+        chromosome: Chromosome,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        bridge: GeneticTablerBridge,
+        mutation_rate: float,
+        smart: bool,
+    ) -> Chromosome:
+        mutated = chromosome.copy()
+        for index, requirement in enumerate(context.lesson_requirements):
+            if self.randomizer.random() > mutation_rate:
+                continue
+            current = mutated.placements[index]
+            slot_id = bridge.mutate_slot(
+                requirement=requirement,
+                current_slot_id=current.time_slot_id,
+                smart=smart,
+            )
+            room_id = self._pick_room_for_slot(
+                requirement=requirement,
+                slot_id=slot_id,
+                current_room_id=current.classroom_id,
+                candidate_domains=candidate_domains,
+                context=context,
+            )
+            mutated.placements[index] = Placement(slot_id, room_id)
+        return mutated
+
+    def _apply_local_search(
+        self,
+        population: list[Chromosome],
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        bridge: GeneticTablerBridge,
+        profile: SearchProfile | None = None,
+    ) -> list[Chromosome]:
+        profile = profile or self._build_search_profile(context)
+        fraction = context.settings.algorithm.ga.local_search_fraction
+        dynamic_top_count = int(round(len(population) * fraction)) if fraction > 0 else 1
+        top_count = max(1, min(len(population), profile.local_search_top_count, dynamic_top_count or 1))
+        improved: list[Chromosome] = []
+        for chromosome in population[:top_count]:
+            improved.append(
+                self._hill_climb(
+                    chromosome=chromosome,
+                    context=context,
+                    candidate_domains=candidate_domains,
+                    iterations=profile.local_search_iterations,
+                    bridge=bridge,
+                    domain_scan_limit=profile.hill_domain_scan_limit,
+                    candidate_slot_limit=profile.hill_candidate_limit,
+                )
+            )
+        improved.extend(item.copy() for item in population[top_count:])
+        return improved
+
+    def _hill_climb(
+        self,
+        chromosome: Chromosome,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        iterations: int,
+        bridge: GeneticTablerBridge,
+        domain_scan_limit: int = 12,
+        candidate_slot_limit: int = 8,
+    ) -> Chromosome:
+        best = evaluate_chromosome(chromosome.copy(), context)
+        indices = list(range(len(context.lesson_requirements)))
+        for _ in range(max(1, iterations)):
+            self.randomizer.shuffle(indices)
+            improved = False
+            for index in indices:
+                requirement = context.lesson_requirements[index]
+                current = best.placements[index]
+                candidate_slots = [
+                    current.time_slot_id,
+                    bridge.mutate_slot(requirement, current.time_slot_id, smart=True),
+                    bridge.mutate_slot(requirement, current.time_slot_id, smart=False),
+                ]
+                for slot_id, room_id in candidate_domains.get(requirement.lesson_id, [])[: max(1, domain_scan_limit)]:
+                    if slot_id not in candidate_slots:
+                        candidate_slots.append(slot_id)
+
+                trial_best = best
+                for slot_id in candidate_slots[: max(1, candidate_slot_limit)]:
+                    candidate_room_id = self._pick_room_for_slot(
+                        requirement=requirement,
+                        slot_id=slot_id,
+                        current_room_id=current.classroom_id,
+                        candidate_domains=candidate_domains,
+                        context=context,
+                    )
+                    candidate = best.copy()
+                    candidate.placements[index] = Placement(slot_id, candidate_room_id)
+                    evaluate_chromosome(candidate, context)
+                    if self._is_better(candidate, trial_best):
+                        trial_best = candidate
+                if self._is_better(trial_best, best):
+                    best = trial_best
+                    improved = True
+            if not improved:
+                break
+        return best
+
+    def _pick_room_for_slot(
+        self,
+        requirement: LessonRequirement,
+        slot_id: int,
+        current_room_id: int,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+        context: GenerationContext,
+    ) -> int:
+        candidates = [
+            room_id
+            for candidate_slot_id, room_id in candidate_domains.get(requirement.lesson_id, [])
+            if candidate_slot_id == slot_id
+        ]
+        if current_room_id in candidates:
+            return current_room_id
+        if candidates:
+            return self.randomizer.choice(candidates)
+
+        fallback = [
+            room_id
+            for room_id, room in context.classrooms.items()
+            if room.capacity >= requirement.min_capacity
+            and room.room_type == requirement.required_room_type
+        ]
+        if fallback:
+            return self.randomizer.choice(fallback)
+        return current_room_id
+
+    @staticmethod
+    def _emit_progress(
+        callback: ProgressCallback | None,
+        *,
+        stage: str,
+        stage_label: str,
+        message: str,
+        progress_percent: int,
+    ) -> None:
+        if callback is None:
+            return
+        callback(stage, stage_label, message, progress_percent)
+
+    @staticmethod
+    def _generation_progress_percent(
+        generation_number: int,
+        total_generations: int,
+        start_percent: int,
+        end_percent: int,
+    ) -> int:
+        if total_generations <= 1:
+            return end_percent
+        span = max(1, end_percent - start_percent)
+        completed = generation_number - 1
+        return min(end_percent, start_percent + int(span * completed / max(1, total_generations - 1)))
+
+    def _initialize_usage_state(self, context: GenerationContext) -> dict[str, object]:
+        state = {
+            'used_class': set(),
+            'used_teacher': set(),
+            'used_room': set(),
+            'subject_daily': defaultdict(int),
+            'class_daily_counts': defaultdict(int),
+            'teacher_daily_counts': defaultdict(int),
+            'class_daily_numbers': defaultdict(list),
+            'teacher_daily_numbers': defaultdict(list),
+            'class_daily_lessons': defaultdict(list),
+            'class_daily_scores': defaultdict(int),
+            'class_weekly_scores': defaultdict(int),
+            'class_day_has_pe': defaultdict(bool),
+            'slot_lookup': {slot.id: slot for slot in context.time_slots},
+            'last_lesson_by_weekday': {
+                weekday: max(
+                    (slot.lesson_number for slot in context.time_slots if slot.weekday == weekday),
+                    default=context.settings.school.max_lessons_per_day,
+                )
+                for weekday in context.weekday_numbers
+            },
+        }
+        slot_lookup = {slot.id: slot for slot in context.time_slots}
+        for fixed in context.fixed_lessons:
+            slot = slot_lookup.get(fixed.time_slot_id)
+            if slot is None:
+                continue
+            placement = Placement(fixed.time_slot_id, fixed.classroom_id)
+            requirement = LessonRequirement(
+                lesson_id=f'fixed:{fixed.class_id}:{fixed.subject_id}:{fixed.time_slot_id}',
+                class_id=fixed.class_id,
+                class_name=context.class_names.get(fixed.class_id, str(fixed.class_id)),
+                class_grade=fixed.class_grade,
+                class_daily_limit=context.class_daily_limits.get(fixed.class_id, context.settings.school.max_lessons_per_day),
+                class_weekly_limit=context.class_weekly_limits.get(fixed.class_id, 0),
+                subject_id=fixed.subject_id,
+                subject_name=fixed.subject_name,
+                difficulty_score=fixed.difficulty_score,
+                is_pe_lesson=is_pe_subject(fixed.subject_name),
+                is_hard_subject=fixed.difficulty_score >= 8,
+                alternation_group=requirement_group(fixed.subject_name, fixed.class_grade),
+                allows_double_lesson=True,
+                teacher_id=fixed.teacher_id,
+                teacher_name='',
+                teacher_preferences=self._empty_preferences(),
+                required_room_type=fixed.required_room_type,
+                min_capacity=0,
+                daily_limit=99,
+                teacher_daily_limit=99,
+            )
+            self._apply_usage_state(state, requirement, placement)
+        return state
+
+    def _apply_usage_state(
+        self,
+        state: dict[str, object],
+        requirement: LessonRequirement,
+        placement: Placement,
+    ) -> None:
+        slot_lookup = state.get('slot_lookup')
+        if slot_lookup is None:
+            raise RuntimeError('Usage state is missing slot_lookup')
+        slot_data = slot_lookup[placement.time_slot_id]
+        weekday = slot_data.weekday
+        state['used_class'].add((requirement.class_id, weekday, placement.time_slot_id))
+        state['used_teacher'].add((requirement.teacher_id, weekday, placement.time_slot_id))
+        state['used_room'].add((placement.classroom_id, weekday, placement.time_slot_id))
+        state['subject_daily'][(requirement.class_id, requirement.subject_id, weekday)] += 1
+        state['class_daily_counts'][(requirement.class_id, weekday)] += 1
+        state['teacher_daily_counts'][(requirement.teacher_id, weekday)] += 1
+        state['class_daily_numbers'][(requirement.class_id, weekday)].append(slot_data.lesson_number)
+        state['teacher_daily_numbers'][(requirement.teacher_id, weekday)].append(slot_data.lesson_number)
+        state['class_daily_lessons'][(requirement.class_id, weekday)].append(
+            (slot_data.lesson_number, requirement.subject_name, requirement.required_room_type)
+        )
+        state['class_daily_scores'][(requirement.class_id, weekday)] += requirement.difficulty_score
+        state['class_weekly_scores'][requirement.class_id] += requirement.difficulty_score
+        state['class_day_has_pe'][(requirement.class_id, weekday)] = (
+            state['class_day_has_pe'][(requirement.class_id, weekday)] or requirement.is_pe_lesson
+        )
+
+    def _postprocess(
+        self,
+        context: GenerationContext,
+        best: Chromosome,
+        progress_callback: ProgressCallback | None = None,
+    ) -> tuple[Chromosome, list[str]]:
+        warnings: list[str] = []
+        problematic_keys = {
+            'sanpin_daily_score_overload',
+            'sanpin_peak_distribution_violation',
+            'sanpin_primary_light_day_violation',
+            'hard_subject_position_violations',
+        }
+        if not any(best.diagnostics.get(key, 0) for key in problematic_keys):
+            return best, warnings
+        if len(context.lesson_requirements) > 60 and best.hard_penalty == 0:
+            warnings.append('Skipped the extra GA post-processing pass for a large problem; hard constraints are already satisfied.')
+            return best, warnings
+
+        boosted_weights = replace(
+            context.settings.algorithm.weights,
+            sanpin_score_penalty=context.settings.algorithm.weights.sanpin_score_penalty * 1.4,
+            peak_day_penalty=context.settings.algorithm.weights.peak_day_penalty * 1.4,
+            hard_subject_position_penalty=context.settings.algorithm.weights.hard_subject_position_penalty * 1.25,
+        )
+        boosted_settings = replace(
+            context.settings,
+            algorithm=replace(context.settings.algorithm, weights=boosted_weights),
+        )
+        boosted_context = load_generation_context(
+            week_start=context.week_start,
+            class_ids=context.class_ids,
+            settings=boosted_settings,
+        )
+        self._emit_progress(
+            progress_callback,
+            stage='postprocessing',
+            stage_label='Финальная проверка',
+            message='Нашли спорные места по СанПиН. Запускаем усиленную донастройку штрафов.',
+            progress_percent=93,
+        )
+        boosted_best, boosted_warnings = self._optimize(
+            boosted_context,
+            seed_population=[best],
+            progress_callback=progress_callback,
+        )
+        warnings.extend(boosted_warnings)
+        if self._is_better(boosted_best, best):
+            warnings.append('Выполнен повторный прогон GA с усиленными весами SanPiN-нарушений.')
+            return boosted_best, warnings
+        return best, warnings
+
+    def _compact_daily_starts(
+        self,
+        chromosome: Chromosome,
+        context: GenerationContext,
+        candidate_domains: dict[str, list[tuple[int, int]]],
+    ) -> Chromosome:
+        compacted = evaluate_chromosome(chromosome.copy(), context)
+        slot_lookup = {slot.id: slot for slot in context.time_slots}
+        for class_id in context.class_ids:
+            for weekday in context.weekday_numbers:
+                lesson_indices = [
+                    index
+                    for index, (requirement, placement) in enumerate(zip(context.lesson_requirements, compacted.placements))
+                    if requirement.class_id == class_id and slot_lookup[placement.time_slot_id].weekday == weekday
+                ]
+                if not lesson_indices:
+                    continue
+                earliest_index = min(
+                    lesson_indices,
+                    key=lambda item: slot_lookup[compacted.placements[item].time_slot_id].lesson_number,
+                )
+                earliest_placement = compacted.placements[earliest_index]
+                earliest_number = slot_lookup[earliest_placement.time_slot_id].lesson_number
+                for target_number in range(1, earliest_number):
+                    target_slot_id = context.slot_id_by_weekday_and_number.get((weekday, target_number))
+                    if target_slot_id is None:
+                        continue
+                    requirement = context.lesson_requirements[earliest_index]
+                    candidate = compacted.copy()
+                    candidate.placements[earliest_index] = Placement(
+                        target_slot_id,
+                        self._pick_room_for_slot(
+                            requirement=requirement,
+                            slot_id=target_slot_id,
+                            current_room_id=earliest_placement.classroom_id,
+                            candidate_domains=candidate_domains,
+                            context=context,
+                        ),
+                    )
+                    evaluate_chromosome(candidate, context)
+                    if self._is_better(candidate, compacted):
+                        compacted = candidate
+                        break
+        return compacted
 
     def _select(self, population: list[Chromosome]) -> Chromosome:
         contenders = self.randomizer.sample(population, k=min(4, len(population)))
@@ -337,175 +1143,6 @@ class GeneticScheduleGenerator:
     def _is_better(self, candidate: Chromosome, baseline: Chromosome) -> bool:
         return self._chromosome_sort_key(candidate) < self._chromosome_sort_key(baseline)
 
-    def _adaptive_mutation_rate(
-        self,
-        generation_index: int,
-        best: Chromosome,
-        stagnation: int,
-    ) -> float:
-        # Conflict-heavy or stagnating populations need stronger mutation pressure.
-        base_rate = self.mutation_rate
-        if best.hard_penalty > 0:
-            base_rate += 0.08
-        if stagnation > 0:
-            base_rate += min(0.18, stagnation * 0.01)
-        if generation_index > (self.generations * 0.7):
-            base_rate += 0.03
-        return max(0.05, min(0.95, base_rate))
-
-    def _inject_diversity(
-        self,
-        population: list[Chromosome],
-        context: GenerationContext,
-        room_choices: dict[str, list[int]],
-        mutation_rate: float,
-    ) -> list[Chromosome]:
-        population.sort(key=self._chromosome_sort_key)
-        keep_count = max(2, self.population_size // 10)
-        immigrant_count = max(3, self.population_size // 6)
-        survivors = [item.copy() for item in population[:keep_count]]
-
-        immigrants = [
-            self._create_initial_chromosome(context, room_choices)
-            for _ in range(immigrant_count)
-        ]
-
-        next_population = survivors + immigrants
-        source_pool = population[: max(keep_count * 2, self.population_size // 3)]
-        while len(next_population) < self.population_size:
-            parent = self.randomizer.choice(source_pool).copy()
-            mutated = mutate(
-                chromosome=parent,
-                context=context,
-                mutation_rate=mutation_rate,
-                randomizer=self.randomizer,
-                room_choices=room_choices,
-            )
-            evaluate_chromosome(mutated, context)
-            next_population.append(mutated)
-        return next_population
-
-    def _repair(
-        self,
-        chromosome: Chromosome,
-        context: GenerationContext,
-        room_choices: dict[str, list[int]],
-    ) -> Chromosome:
-        repaired = chromosome.copy()
-        evaluate_chromosome(repaired, context)
-        slot_ids = [slot.id for slot in sorted(context.time_slots, key=lambda item: (item.lesson_number, item.weekday))]
-        soft_target = max(40, len(context.lesson_requirements) // 4)
-
-        max_rounds = 3 if repaired.hard_penalty > 0 else 2
-        for round_index in range(max_rounds):
-            improved_in_round = False
-            indices = list(range(len(context.lesson_requirements)))
-            self.randomizer.shuffle(indices)
-
-            for index in indices:
-                requirement = context.lesson_requirements[index]
-                current = repaired.placements[index]
-                best_placement = current
-                best_snapshot = repaired.copy()
-                best_key = self._chromosome_sort_key(repaired)
-
-                candidate_slots = self._repair_slot_candidates(slot_ids, current.time_slot_id, repaired.hard_penalty > 0)
-                candidate_rooms = self._repair_room_candidates(
-                    self._candidate_rooms_for_requirement(requirement, context, room_choices),
-                    current.classroom_id,
-                )
-                for slot_id in candidate_slots:
-                    for room_id in candidate_rooms:
-                        candidate = Placement(slot_id, room_id)
-                        if candidate == current:
-                            continue
-                        repaired.placements[index] = candidate
-                        evaluate_chromosome(repaired, context)
-                        candidate_key = self._chromosome_sort_key(repaired)
-                        if candidate_key < best_key:
-                            best_key = candidate_key
-                            best_placement = candidate
-                            best_snapshot = repaired.copy()
-
-                repaired.placements[index] = best_placement
-                repaired.hard_penalty = best_snapshot.hard_penalty
-                repaired.soft_penalty = best_snapshot.soft_penalty
-                repaired.score = best_snapshot.score
-                repaired.diagnostics = dict(best_snapshot.diagnostics)
-
-                if best_placement != current:
-                    improved_in_round = True
-
-            evaluate_chromosome(repaired, context)
-            if repaired.hard_penalty == 0 and repaired.soft_penalty <= soft_target:
-                break
-            if not improved_in_round and round_index > 0:
-                break
-
-        return evaluate_chromosome(repaired, context)
-
-    def _build_room_choices(self, context: GenerationContext) -> dict[str, list[int]]:
-        room_choices: dict[str, list[int]] = {}
-        for room_id, room in context.classrooms.items():
-            room_choices.setdefault(room.room_type, []).append(room_id)
-        return room_choices
-
-    def _candidate_rooms_for_requirement(
-        self,
-        requirement: LessonRequirement,
-        context: GenerationContext,
-        room_choices: dict[str, list[int]],
-    ) -> list[int]:
-        typed_rooms = room_choices.get(requirement.required_room_type, [])
-        suitable = [
-            room_id
-            for room_id in typed_rooms
-            if context.classrooms[room_id].capacity >= requirement.min_capacity
-        ]
-        if suitable:
-            return suitable
-        fallback = [
-            room_id
-            for room_id, room in context.classrooms.items()
-            if room.capacity >= requirement.min_capacity
-        ]
-        return fallback or list(context.classrooms.keys())
-
-    def _repair_slot_candidates(
-        self,
-        slot_ids: list[int],
-        current_slot_id: int,
-        hard_conflicts_present: bool,
-    ) -> list[int]:
-        if hard_conflicts_present:
-            return slot_ids
-
-        prioritized = [current_slot_id]
-        for slot_id in slot_ids:
-            if slot_id == current_slot_id:
-                continue
-            prioritized.append(slot_id)
-            if len(prioritized) >= min(14, len(slot_ids)):
-                break
-        return prioritized
-
-    def _repair_room_candidates(
-        self,
-        room_ids: list[int],
-        current_room_id: int,
-    ) -> list[int]:
-        if not room_ids:
-            return [current_room_id]
-
-        unique = [current_room_id]
-        for room_id in room_ids:
-            if room_id in unique:
-                continue
-            unique.append(room_id)
-            if len(unique) >= 6:
-                break
-        return unique
-
     def _start_and_gap_penalty(
         self,
         lesson_number: int,
@@ -515,7 +1152,6 @@ class GeneticScheduleGenerator:
     ) -> int:
         if not existing_numbers:
             return max(0, lesson_number - 1) * weight_late_start
-
         updated = sorted(set(existing_numbers + [lesson_number]))
         gaps = max(0, (updated[-1] - updated[0] + 1) - len(updated))
         late_start = max(0, updated[0] - 1)
@@ -530,12 +1166,11 @@ class GeneticScheduleGenerator:
     ) -> int:
         if not existing_lessons:
             return 0
-
         penalty = 0
         for existing_number, existing_subject, _room_type in existing_lessons:
             if abs(existing_number - lesson_number) != 1:
                 continue
-            existing_group = alternation_group(existing_subject, class_grade)
+            existing_group = requirement_group(existing_subject, class_grade)
             if class_grade <= 4:
                 if subject_group in {'hard', 'light'} and subject_group == existing_group:
                     penalty += 12
@@ -552,17 +1187,24 @@ class GeneticScheduleGenerator:
     ) -> int:
         if allows_double_lesson:
             return 0
-
         for existing_number, existing_subject, _room_type in existing_lessons:
             if existing_subject == subject_name and abs(existing_number - lesson_number) == 1:
-                return 85
+                return 90
         return 0
 
-    def _difficulty_weekday_penalty(self, weekday: int, is_hard_subject: bool) -> int:
-        if not is_hard_subject:
-            return 0
-        if weekday in {1, 5}:
-            return 16
-        if weekday in {2, 3}:
-            return -4
-        return 0
+    def _empty_preferences(self):
+        class _Preferences:
+            avoid_first_lesson = False
+            avoid_last_lesson = False
+            preferred_weekdays = ()
+            avoid_weekdays = ()
+            preferred_lesson_numbers = ()
+            avoid_lesson_numbers = ()
+
+        return _Preferences()
+
+
+def requirement_group(subject_name: str, class_grade: int) -> str:
+    from .school_rules import alternation_group
+
+    return alternation_group(subject_name, class_grade)

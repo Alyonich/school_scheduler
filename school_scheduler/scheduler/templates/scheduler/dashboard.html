@@ -3,6 +3,7 @@
 {% block title %}Главная · Школьное расписание{% endblock %}
 
 {% block content %}
+{% include "scheduler/_generation_active_banner.html" with job=active_generation_job %}
 <div class="grid grid-2">
     <section class="panel">
         <h2>Обзор проекта</h2>

@@ -11,15 +11,16 @@ from .school_rules import allows_double_lesson, is_pe_subject
 
 
 def persist_schedule(chromosome: Chromosome, context: GenerationContext) -> tuple[int, int]:
-    week_end = context.week_start + timedelta(days=5)
+    week_end = context.week_start + timedelta(days=len(context.weekday_numbers))
 
     slot_lookup = {slot.id: slot for slot in context.time_slots}
     existing = list(
         Schedule.objects.select_related('subject', 'time_slot__lesson_time').filter(
-            class_obj_id__in=context.class_ids,
             lesson_date__gte=context.week_start,
             lesson_date__lt=week_end,
-            is_locked=True,
+        ).exclude(
+            class_obj_id__in=context.class_ids,
+            is_locked=False,
         )
     )
     used_class = {(item.class_obj_id, item.lesson_date, item.time_slot_id) for item in existing}
@@ -137,9 +138,6 @@ def _place_requirement(
         projected_day = day_lessons + [(slot.lesson_number, requirement.subject_name, requirement.required_room_type)]
         if len(projected_day) > _allowed_daily_limit(requirement, projected_day):
             continue
-        if _has_forbidden_double_lessons(requirement.class_grade, projected_day):
-            continue
-
         candidate = Schedule(
             class_obj_id=requirement.class_id,
             subject_id=requirement.subject_id,
