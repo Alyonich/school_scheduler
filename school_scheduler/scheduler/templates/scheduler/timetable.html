@@ -48,7 +48,7 @@
     <div class="actions" style="justify-content: space-between; align-items: center; margin-bottom: 1rem;">
         <div>
             <h2 style="margin: 0;">Сетка расписания</h2>
-            <p class="muted" style="margin: 0.35rem 0 0;">Здесь видно, кому принадлежит расписание. Нажмите на занятие, чтобы отредактировать его или закрепить вручную.</p>
+            <p class="muted" style="margin: 0.35rem 0 0;">{{ timetable_scope_label }} Нажмите на занятие, чтобы отредактировать его или закрепить вручную.</p>
         </div>
         <a class="button secondary" href="{% url 'scheduler:schedule_create' %}">Создать занятие вручную</a>
     </div>

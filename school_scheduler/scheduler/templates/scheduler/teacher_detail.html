@@ -1,0 +1,156 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}{{ teacher }} · Преподаватель · Школьное расписание{% endblock %}
+
+{% block content %}
+<div class="grid grid-2">
+    <section class="panel">
+        <div class="actions" style="justify-content: space-between; align-items: flex-start;">
+            <div>
+                <h2 style="margin: 0;">{{ teacher }}</h2>
+                <p class="muted" style="margin: 0.45rem 0 0;">{{ teacher.qualification }}</p>
+            </div>
+            <a class="button secondary" href="{% url 'scheduler:timetable' %}?teacher={{ teacher.pk }}&week_start={{ week_start|date:'Y-m-d' }}">Открыть расписание преподавателя</a>
+        </div>
+
+        <div class="grid grid-3" style="margin-top: 1rem;">
+            <div class="metric">
+                <span class="muted">Максимум часов в неделю</span>
+                <strong>{{ teacher.workload_hours }}</strong>
+            </div>
+            <div class="metric">
+                <span class="muted">Максимум уроков в день</span>
+                <strong>{{ teacher.max_lessons_per_day }}</strong>
+            </div>
+            <div class="metric">
+                <span class="muted">Закреплённых классов</span>
+                <strong>{{ assigned_classes|length }}</strong>
+            </div>
+        </div>
+
+        <div style="margin-top: 1rem;">
+            <h3>Закреплённые классы</h3>
+            {% if assigned_classes %}
+                <div class="actions">
+                    {% for class_obj in assigned_classes %}
+                        <a class="badge" href="{% url 'scheduler:timetable' %}?class_obj={{ class_obj.pk }}&week_start={{ week_start|date:'Y-m-d' }}">{{ class_obj.name }}</a>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="empty">У преподавателя пока нет закреплённых классов.</div>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="panel">
+        <h2>Выбор недели</h2>
+        <p class="muted">Доступность ниже редактируется для конкретной недели. Остальные недели не изменятся.</p>
+        <form method="get">
+            <div class="field">
+                <label for="id_week_start">Неделя</label>
+                <input id="id_week_start" name="week_start" type="date" value="{{ week_start|date:'Y-m-d' }}">
+            </div>
+            <div class="actions">
+                <a class="button secondary" href="?week_start={{ previous_week_start|date:'Y-m-d' }}">Предыдущая неделя</a>
+                <button type="submit">Показать неделю</button>
+                <a class="button secondary" href="?week_start={{ next_week_start|date:'Y-m-d' }}">Следующая неделя</a>
+            </div>
+        </form>
+    </section>
+</div>
+
+<div class="grid grid-2" style="margin-top: 1rem;">
+    <section class="panel">
+        <h2>Доступность по дням недели</h2>
+        <p class="muted">Изменения будут применены только к неделе, начинающейся {{ week_start|date:"d.m.Y" }}.</p>
+        {% if mixed_days %}
+            <div class="message warning">
+                Для некоторых дней уже были частично настроенные слоты: {{ mixed_days|join:", " }}.
+                После сохранения статус дня станет единым для всех уроков этого дня только на выбранной неделе.
+            </div>
+        {% endif %}
+        <form method="post" action="?week_start={{ week_start|date:'Y-m-d' }}">
+            {% csrf_token %}
+            {% for field in availability_form %}
+                <div class="field">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                </div>
+            {% endfor %}
+            <button type="submit">Сохранить доступность на эту неделю</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <h2>Статусы по дням</h2>
+        <div class="grid grid-3">
+            {% for day in availability_days %}
+                <div class="metric">
+                    <span class="muted">{{ day.label }}</span>
+                    <strong style="font-size: 1.25rem;">{{ day.status_label }}</strong>
+                    <div class="muted" style="margin-top: 0.35rem;">Занятий на неделе: {{ day.lessons_count }}</div>
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+
+<div class="grid grid-2" style="margin-top: 1rem;">
+    <section class="panel">
+        <h2>Назначения преподавателя</h2>
+        {% if assignments %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Класс</th>
+                        <th>Предмет</th>
+                        <th>Часов в неделю</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for assignment in assignments %}
+                        <tr>
+                            <td>{{ assignment.class_obj.name }}</td>
+                            <td>{{ assignment.subject.name }}</td>
+                            <td>{{ assignment.hours_per_week|default:"—" }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">Назначений пока нет.</div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <h2>Занятия на неделе {{ week_start|date:"d.m.Y" }}</h2>
+        <p class="muted">Здесь видно, как доступность выбранной недели сочетается с уже составленным расписанием.</p>
+        {% if week_schedule %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Дата</th>
+                        <th>Урок</th>
+                        <th>Класс</th>
+                        <th>Предмет</th>
+                        <th>Кабинет</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for lesson in week_schedule %}
+                        <tr>
+                            <td>{{ lesson.lesson_date|date:"d.m.Y" }}</td>
+                            <td>#{{ lesson.time_slot.lesson_time.lesson_number }} · {{ lesson.time_slot.lesson_time.start_time|time:"H:i" }}</td>
+                            <td>{{ lesson.class_obj.name }}</td>
+                            <td>{{ lesson.subject.name }}</td>
+                            <td>{{ lesson.classroom.name }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="empty">На выбранной неделе у преподавателя пока нет занятий.</div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import date, timedelta
 import json
 import os
@@ -13,7 +14,13 @@ from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpRe
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 
-from .forms import ScheduleEntryForm, ScheduleFilterForm, ScheduleGenerationForm, current_monday
+from .forms import (
+    ScheduleEntryForm,
+    ScheduleFilterForm,
+    ScheduleGenerationForm,
+    TeacherWeeklyAvailabilityForm,
+    current_monday,
+)
 from .generation_jobs import (
     GenerationAlreadyRunningError,
     get_active_generation_job,
@@ -22,7 +29,21 @@ from .generation_jobs import (
     update_generation_job,
     wait_for_generation_job_update,
 )
-from .models import Class, ClassSubject, Schedule, ScheduleChange, ScheduleChangeType, Teacher, TimeSlot, WeeklyClassSubjectLoad, Weekday
+from .models import (
+    AvailabilityStatus,
+    Class,
+    ClassSubject,
+    Schedule,
+    ScheduleChange,
+    ScheduleChangeType,
+    Teacher,
+    TeacherAvailability,
+    TimeSlot,
+    WeeklyClassSubjectLoad,
+    Weekday,
+    normalize_week_start,
+    teacher_availability_map_for_week,
+)
 from .services.schedule_generator import GeneticScheduleGenerator
 
 if os.name == 'nt':
@@ -182,6 +203,92 @@ def timetable(request: HttpRequest) -> HttpResponse:
                 }
             ),
             'active_generation_job': get_active_generation_job(),
+        },
+    )
+
+
+def teacher_detail(request: HttpRequest, pk: int) -> HttpResponse:
+    teacher = get_object_or_404(
+        Teacher.objects.select_related('user'),
+        pk=pk,
+    )
+    week_start = _query_week_start(request)
+    weekday_choices = _teacher_weekday_choices()
+    day_statuses, mixed_days = _teacher_day_statuses(
+        teacher=teacher,
+        week_start=week_start,
+        weekday_numbers=[weekday for weekday, _label in weekday_choices],
+    )
+
+    form = TeacherWeeklyAvailabilityForm(
+        request.POST or None,
+        weekday_choices=weekday_choices,
+        initial_statuses=day_statuses,
+    )
+    if request.method == 'POST' and form.is_valid():
+        _save_teacher_weekday_statuses(
+            teacher=teacher,
+            week_start=week_start,
+            day_statuses=form.cleaned_statuses(),
+        )
+        messages.success(
+            request,
+            'Доступность преподавателя для выбранной недели обновлена. Эти настройки уже влияют на генерацию и ручное редактирование расписания.',
+        )
+        redirect_url = reverse('scheduler:teacher_detail', args=[teacher.pk])
+        return redirect(f'{redirect_url}?week_start={week_start.isoformat()}')
+
+    assignments = list(
+        teacher.teaching_assignments.select_related('class_obj', 'subject')
+        .order_by('class_obj__grade', 'class_obj__parallel', 'subject__name')
+    )
+    assigned_classes: list[Class] = []
+    seen_classes: set[int] = set()
+    for assignment in assignments:
+        if assignment.class_obj_id in seen_classes:
+            continue
+        assigned_classes.append(assignment.class_obj)
+        seen_classes.add(assignment.class_obj_id)
+
+    week_schedule = list(
+        teacher.schedules.select_related('class_obj', 'subject', 'classroom', 'time_slot__lesson_time')
+        .filter(
+            lesson_date__gte=week_start,
+            lesson_date__lt=week_start + timedelta(days=7),
+        )
+        .order_by('lesson_date', 'time_slot__lesson_time__lesson_number')
+    )
+    scheduled_by_weekday: dict[int, list[Schedule]] = defaultdict(list)
+    for lesson in week_schedule:
+        scheduled_by_weekday[lesson.lesson_date.isoweekday()].append(lesson)
+
+    status_labels = dict(TeacherWeeklyAvailabilityForm.STATUS_CHOICES)
+    availability_days = [
+        {
+            'weekday': weekday,
+            'label': label,
+            'status': day_statuses.get(weekday, AvailabilityStatus.WORKING),
+            'status_label': status_labels.get(day_statuses.get(weekday, AvailabilityStatus.WORKING), 'Работает'),
+            'lessons': scheduled_by_weekday.get(weekday, []),
+            'lessons_count': len(scheduled_by_weekday.get(weekday, [])),
+        }
+        for weekday, label in weekday_choices
+    ]
+
+    return render(
+        request,
+        'scheduler/teacher_detail.html',
+        {
+            'teacher': teacher,
+            'week_start': week_start,
+            'availability_form': form,
+            'availability_days': availability_days,
+            'mixed_days': [_weekday_label(weekday) for weekday in mixed_days],
+            'assigned_classes': assigned_classes,
+            'assignments': assignments,
+            'week_schedule': week_schedule,
+            'previous_week_start': week_start - timedelta(days=7),
+            'next_week_start': week_start + timedelta(days=7),
         },
     )
 
@@ -731,6 +838,138 @@ def _entry_initial(request: HttpRequest) -> dict:
 
 def _timetable_redirect(schedule: Schedule) -> str:
     return f'{reverse("scheduler:timetable")}?class_obj={schedule.class_obj_id}&week_start={schedule.lesson_date.isoformat()}'
+
+
+def _query_week_start(request: HttpRequest) -> date:
+    raw_value = (request.GET.get('week_start') or '').strip()
+    if not raw_value:
+        return current_monday()
+    try:
+        parsed = date.fromisoformat(raw_value)
+    except ValueError:
+        return current_monday()
+    return parsed - timedelta(days=parsed.weekday())
+
+
+def _teacher_weekday_choices() -> list[tuple[int, str]]:
+    weekday_numbers = list(
+        TimeSlot.objects.order_by('weekday').values_list('weekday', flat=True).distinct()
+    )
+    if not weekday_numbers:
+        weekday_numbers = [choice.value for choice in Weekday]
+    return [(weekday, _weekday_label(weekday)) for weekday in weekday_numbers]
+
+
+def _weekday_label(weekday: int) -> str:
+    try:
+        return str(Weekday(weekday).label)
+    except ValueError:
+        return f'День {weekday}'
+
+
+def _teacher_day_statuses(
+    *,
+    teacher: Teacher,
+    week_start: date,
+    weekday_numbers: list[int],
+) -> tuple[dict[int, str], list[int]]:
+    slots = list(
+        TimeSlot.objects.filter(weekday__in=weekday_numbers)
+        .order_by('weekday', 'lesson_time__lesson_number')
+    )
+    slots_by_weekday: dict[int, list[int]] = defaultdict(list)
+    for slot in slots:
+        slots_by_weekday[slot.weekday].append(slot.id)
+
+    availability_map = {
+        time_slot_id: status
+        for (teacher_id, time_slot_id), status in teacher_availability_map_for_week(
+            week_start=week_start,
+            teacher_ids=[teacher.pk],
+            time_slot_ids=[slot.id for slot in slots],
+        ).items()
+        if teacher_id == teacher.pk
+    }
+
+    day_statuses: dict[int, str] = {}
+    mixed_days: list[int] = []
+    for weekday in weekday_numbers:
+        slot_ids = slots_by_weekday.get(weekday, [])
+        if not slot_ids:
+            day_statuses[weekday] = AvailabilityStatus.WORKING
+            continue
+        statuses = {availability_map.get(slot_id, AvailabilityStatus.WORKING) for slot_id in slot_ids}
+        if len(statuses) == 1:
+            day_statuses[weekday] = next(iter(statuses))
+            continue
+        mixed_days.append(weekday)
+        if AvailabilityStatus.SICK in statuses and AvailabilityStatus.WORKING not in statuses:
+            day_statuses[weekday] = AvailabilityStatus.SICK
+        elif AvailabilityStatus.DAY_OFF in statuses and AvailabilityStatus.WORKING not in statuses:
+            day_statuses[weekday] = AvailabilityStatus.DAY_OFF
+        else:
+            day_statuses[weekday] = AvailabilityStatus.WORKING
+    return day_statuses, mixed_days
+
+
+def _save_teacher_weekday_statuses(*, teacher: Teacher, week_start: date, day_statuses: dict[int, str]) -> None:
+    normalized_week_start = normalize_week_start(week_start)
+    slots = list(
+        TimeSlot.objects.filter(weekday__in=list(day_statuses.keys()))
+        .order_by('weekday', 'lesson_time__lesson_number')
+    )
+    existing_week = {
+        item.time_slot_id: item
+        for item in TeacherAvailability.objects.filter(
+            teacher=teacher,
+            week_start=normalized_week_start,
+            time_slot_id__in=[slot.id for slot in slots],
+        )
+    }
+    base_statuses = {
+        item.time_slot_id: item.status or (AvailabilityStatus.WORKING if item.is_available else AvailabilityStatus.DAY_OFF)
+        for item in TeacherAvailability.objects.filter(
+            teacher=teacher,
+            week_start__isnull=True,
+            time_slot_id__in=[slot.id for slot in slots],
+        )
+    }
+
+    to_create: list[TeacherAvailability] = []
+    to_update: list[TeacherAvailability] = []
+    to_delete: list[int] = []
+    for slot in slots:
+        status = day_statuses.get(slot.weekday, AvailabilityStatus.WORKING)
+        base_status = base_statuses.get(slot.id, AvailabilityStatus.WORKING)
+        is_available = status == AvailabilityStatus.WORKING
+        current = existing_week.get(slot.id)
+        if status == base_status:
+            if current is not None:
+                to_delete.append(current.pk)
+            continue
+        if current is None:
+            to_create.append(
+                TeacherAvailability(
+                    teacher=teacher,
+                    time_slot=slot,
+                    week_start=normalized_week_start,
+                    is_available=is_available,
+                    status=status,
+                )
+            )
+            continue
+        if current.status != status or current.is_available != is_available:
+            current.status = status
+            current.is_available = is_available
+            to_update.append(current)
+
+    with transaction.atomic():
+        if to_delete:
+            TeacherAvailability.objects.filter(pk__in=to_delete).delete()
+        if to_create:
+            TeacherAvailability.objects.bulk_create(to_create)
+        if to_update:
+            TeacherAvailability.objects.bulk_update(to_update, fields=['status', 'is_available', 'week_start'])
 
 
 def _dashboard_summary(week_start: date | None = None) -> dict:

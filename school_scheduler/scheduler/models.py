@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
@@ -41,6 +43,23 @@ class ScheduleChangeType(models.TextChoices):
     TEACHER_SUBSTITUTION = 'teacher_substitution', 'замена преподавателя'
     RESCHEDULE = 'reschedule', 'перенос'
     CANCEL = 'cancel', 'отмена'
+
+
+class AvailabilityStatus(models.TextChoices):
+    WORKING = 'working', 'Р Р°Р±РѕС‚Р°РµС‚'
+    DAY_OFF = 'day_off', 'РќРµ СЂР°Р±РѕС‚Р°РµС‚'
+    SICK = 'sick', 'Р‘РѕР»РµРµС‚'
+
+
+AVAILABILITY_STATUS_LABELS: dict[str, str] = {
+    AvailabilityStatus.WORKING: '\u0420\u0430\u0431\u043e\u0442\u0430\u0435\u0442',
+    AvailabilityStatus.DAY_OFF: '\u041d\u0435 \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0442',
+    AvailabilityStatus.SICK: '\u0411\u043e\u043b\u0435\u0435\u0442',
+}
+
+
+def availability_status_label(value: str) -> str:
+    return AVAILABILITY_STATUS_LABELS.get(value, value)
 
 
 class Class(models.Model):
@@ -391,11 +410,35 @@ class TeacherAvailability(models.Model):
         on_delete=models.CASCADE,
         related_name='teacher_availabilities'
     )
+    week_start = models.DateField(null=True, blank=True, db_index=True)
     is_available = models.BooleanField(default=True)
+    status = models.CharField(
+        max_length=20,
+        choices=AvailabilityStatus.choices,
+        default=AvailabilityStatus.WORKING,
+    )
+
+    def clean(self):
+        if self.week_start:
+            self.week_start = normalize_week_start(self.week_start)
+        if self.status == AvailabilityStatus.WORKING and not self.is_available:
+            self.status = AvailabilityStatus.DAY_OFF
+        self.is_available = self.status == AvailabilityStatus.WORKING
+
+    def save(self, *args, **kwargs):
+        if self.week_start:
+            self.week_start = normalize_week_start(self.week_start)
+        if self.status == AvailabilityStatus.WORKING and not self.is_available:
+            self.status = AvailabilityStatus.DAY_OFF
+        self.is_available = self.status == AvailabilityStatus.WORKING
+        return super().save(*args, **kwargs)
 
     def __str__(self):
-        status = 'доступен' if self.is_available else 'недоступен'
-        return f'{self.teacher} / {self.time_slot} / {status}'
+        if self.week_start:
+            scope = f'неделя {self.week_start:%d.%m.%Y}'
+        else:
+            scope = 'шаблон'
+        return f'{self.teacher} / {self.time_slot} / {scope} / {self.get_status_display()}'
 
     class Meta:
         verbose_name = 'доступность преподавателя'
@@ -403,9 +446,77 @@ class TeacherAvailability(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['teacher', 'time_slot'],
-                name='unique_teacher_time_slot'
-            )
+                condition=models.Q(week_start__isnull=True),
+                name='unique_teacher_time_slot_default'
+            ),
+            models.UniqueConstraint(
+                fields=['teacher', 'time_slot', 'week_start'],
+                condition=models.Q(week_start__isnull=False),
+                name='unique_teacher_time_slot_week'
+            ),
         ]
+
+
+def normalize_week_start(value: date | None) -> date | None:
+    if value is None:
+        return None
+    return value - timedelta(days=value.weekday())
+
+
+def teacher_availability_map_for_week(
+    week_start: date,
+    teacher_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    time_slot_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+) -> dict[tuple[int, int], str]:
+    normalized_week_start = normalize_week_start(week_start)
+    queryset = TeacherAvailability.objects.filter(
+        models.Q(week_start=normalized_week_start) | models.Q(week_start__isnull=True)
+    ).order_by('teacher_id', 'time_slot_id', 'week_start')
+    if teacher_ids is not None:
+        queryset = queryset.filter(teacher_id__in=list(teacher_ids))
+    if time_slot_ids is not None:
+        queryset = queryset.filter(time_slot_id__in=list(time_slot_ids))
+
+    result: dict[tuple[int, int], str] = {}
+    for availability in queryset:
+        status = availability.status or (
+            AvailabilityStatus.WORKING if availability.is_available else AvailabilityStatus.DAY_OFF
+        )
+        result[(availability.teacher_id, availability.time_slot_id)] = status
+    return result
+
+
+def teacher_unavailability_pairs_for_week(
+    week_start: date,
+    teacher_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    time_slot_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+) -> set[tuple[int, int]]:
+    availability_map = teacher_availability_map_for_week(
+        week_start=week_start,
+        teacher_ids=teacher_ids,
+        time_slot_ids=time_slot_ids,
+    )
+    return {
+        key
+        for key, status in availability_map.items()
+        if status != AvailabilityStatus.WORKING
+    }
+
+
+def teacher_availability_status_for_lesson(
+    *,
+    teacher_id: int | None,
+    time_slot_id: int | None,
+    lesson_date: date | None,
+) -> str:
+    if teacher_id is None or time_slot_id is None or lesson_date is None:
+        return AvailabilityStatus.WORKING
+    availability_map = teacher_availability_map_for_week(
+        week_start=lesson_date,
+        teacher_ids=[teacher_id],
+        time_slot_ids=[time_slot_id],
+    )
+    return availability_map.get((teacher_id, time_slot_id), AvailabilityStatus.WORKING)
 
 
 class Schedule(models.Model):
@@ -464,17 +575,22 @@ class Schedule(models.Model):
         if self.classroom.capacity < self.class_obj.students_count:
             errors['classroom'] = 'Вместимость кабинета меньше количества учеников в классе.'
 
-        availability = TeacherAvailability.objects.filter(
-            teacher=self.teacher,
-            time_slot=self.time_slot
-        ).first()
-
-        if availability and not availability.is_available:
-            errors['time_slot'] = 'Преподаватель недоступен в данный временной слот.'
-
         if self.lesson_date and self.time_slot_id:
             if self.lesson_date.isoweekday() != self.time_slot.weekday:
                 errors['lesson_date'] = 'Дата урока должна совпадать с днем недели выбранного слота.'
+            availability_status = teacher_availability_status_for_lesson(
+                teacher_id=self.teacher_id,
+                time_slot_id=self.time_slot_id,
+                lesson_date=self.lesson_date,
+            )
+            if availability_status != AvailabilityStatus.WORKING:
+                status_label = availability_status_label(availability_status)
+                lesson_date_label = self.lesson_date.strftime('%d.%m.%Y')
+                errors['time_slot'] = (
+                    f'Нельзя сохранить занятие: на {lesson_date_label} преподаватель отмечен как '
+                    f'"{status_label}" для этого временного слота. '
+                    'Выберите другого преподавателя, другую дату или измените доступность на странице преподавателя.'
+                )
 
         if errors:
             raise ValidationError(errors)

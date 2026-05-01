@@ -7,6 +7,7 @@ app_name = 'scheduler'
 urlpatterns = [
     path('', views.dashboard, name='dashboard'),
     path('timetable/', views.timetable, name='timetable'),
+    path('teachers/<int:pk>/', views.teacher_detail, name='teacher_detail'),
     path('generate/', views.start_generation, name='generate'),
     path('generate/jobs/<str:job_id>/', views.generation_progress, name='generation_progress'),
     path('generate/jobs/<str:job_id>/status/', views.generation_status, name='generation_status'),

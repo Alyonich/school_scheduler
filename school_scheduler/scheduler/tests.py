@@ -1,16 +1,19 @@
 from datetime import date, time
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.test import Client, TestCase
 from django.urls import reverse
 
 from .models import (
+    AvailabilityStatus,
     Class,
     ClassSubject,
     Classroom,
     EducationLevel,
     LessonTime,
     RoomType,
+    Schedule,
     Subject,
     Teacher,
     TeacherAvailability,
@@ -136,3 +139,68 @@ class SchedulerSmokeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'Сетка расписания')
         self.assertContains(response, 'Показано расписание класса 7A.')
+        self.assertNotContains(response, 'Здесь видно, кому принадлежит расписание.')
+
+    def test_dashboard_hides_generation_block_and_links_teacher_detail(self):
+        response = Client().get(reverse('scheduler:dashboard'))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'Автоматически составить расписание')
+        self.assertContains(response, reverse('scheduler:teacher_detail', args=[self.math_teacher.pk]))
+
+    def test_teacher_detail_page_renders_assignments_and_statuses(self):
+        response = Client().get(
+            reverse('scheduler:teacher_detail', args=[self.math_teacher.pk]),
+            {'week_start': self.week_start.isoformat()},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Выбор недели')
+        self.assertContains(response, 'Назначения преподавателя')
+        self.assertContains(response, self.class_obj.name)
+        self.assertContains(response, self.math.name)
+        self.assertContains(response, 'Доступность по дням недели')
+
+    def test_teacher_detail_updates_day_status_and_affects_generation_and_manual_edit(self):
+        response = Client().post(
+            f"{reverse('scheduler:teacher_detail', args=[self.math_teacher.pk])}?week_start={self.week_start.isoformat()}",
+            {
+                'weekday_1': AvailabilityStatus.SICK,
+                'weekday_2': AvailabilityStatus.WORKING,
+                'weekday_3': AvailabilityStatus.WORKING,
+                'weekday_4': AvailabilityStatus.WORKING,
+                'weekday_5': AvailabilityStatus.WORKING,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        monday_slot_ids = list(TimeSlot.objects.filter(weekday=Weekday.MONDAY).values_list('id', flat=True))
+        monday_availabilities = TeacherAvailability.objects.filter(
+            teacher=self.math_teacher,
+            week_start=self.week_start,
+            time_slot_id__in=monday_slot_ids,
+        )
+        self.assertTrue(monday_availabilities.exists())
+        self.assertTrue(all(item.status == AvailabilityStatus.SICK for item in monday_availabilities))
+        self.assertTrue(all(item.is_available is False for item in monday_availabilities))
+
+        context = load_generation_context(self.week_start, class_ids=[self.class_obj.id])
+        for slot_id in monday_slot_ids:
+            self.assertIn((self.math_teacher.id, slot_id), context.teacher_unavailability)
+
+        monday_slot = TimeSlot.objects.get(weekday=Weekday.MONDAY, lesson_time__lesson_number=1)
+        schedule = Schedule(
+            class_obj=self.class_obj,
+            subject=self.math,
+            teacher=self.math_teacher,
+            classroom=Classroom.objects.get(name='101'),
+            time_slot=monday_slot,
+            lesson_date=self.week_start,
+        )
+        with self.assertRaises(ValidationError) as exc_info:
+            schedule.full_clean()
+        self.assertIn('Нельзя сохранить занятие', str(exc_info.exception))
+        self.assertIn('Болеет', str(exc_info.exception))
+        self.assertIn('измените доступность на странице преподавателя', str(exc_info.exception))
+
+        next_week_context = load_generation_context(self.week_start + date.resolution * 7, class_ids=[self.class_obj.id])
+        for slot_id in monday_slot_ids:
+            self.assertNotIn((self.math_teacher.id, slot_id), next_week_context.teacher_unavailability)

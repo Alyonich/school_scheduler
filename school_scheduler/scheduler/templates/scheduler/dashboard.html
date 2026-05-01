@@ -4,50 +4,29 @@
 
 {% block content %}
 {% include "scheduler/_generation_active_banner.html" with job=active_generation_job %}
-<div class="grid grid-2">
-    <section class="panel">
-        <h2>Обзор проекта</h2>
-        <p class="muted">Краткая сводка по тестовым школьным данным и текущему состоянию расписания.</p>
-        <div class="grid grid-2">
-            <div class="metric">
-                <span class="muted">Классы</span>
-                <strong>{{ summary.classes }}</strong>
-            </div>
-            <div class="metric">
-                <span class="muted">Преподаватели</span>
-                <strong>{{ summary.teachers }}</strong>
-            </div>
-            <div class="metric">
-                <span class="muted">Занятия на этой неделе</span>
-                <strong>{{ summary.lessons_this_week }}</strong>
-            </div>
-            <div class="metric">
-                <span class="muted">Закреплённые занятия</span>
-                <strong>{{ summary.locked_lessons }}</strong>
-            </div>
-        </div>
-    </section>
 
-    <section class="panel">
-        <h2>Автоматически составить расписание</h2>
-        <p class="muted">Система учитывает конфликты, доступность преподавателей, ограничения по предметам и старается не допускать окон между уроками.</p>
-        <form method="post" action="{% url 'scheduler:generate' %}" id="generate-form-dashboard">
-            {% csrf_token %}
-            {% include "scheduler/_workload_editor_v2.html" with workload_classes=workload_classes selected_generation_class_ids=selected_generation_class_ids generation_form=generation_form form_id="generate-form-dashboard" %}
-            {% for field in generation_form %}
-                {% if field.name != 'classes' %}
-                <div class="field">
-                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                    {{ field }}
-                    {% if field.help_text %}<div class="muted">{{ field.help_text }}</div>{% endif %}
-                    {% for error in field.errors %}<div class="message error">{{ error }}</div>{% endfor %}
-                </div>
-                {% endif %}
-            {% endfor %}
-            <button type="submit">Составить расписание</button>
-        </form>
-    </section>
-</div>
+<section class="panel">
+    <h2>Обзор проекта</h2>
+    <p class="muted">Краткая сводка по текущему состоянию расписания и тестовым школьным данным.</p>
+    <div class="grid grid-2">
+        <div class="metric">
+            <span class="muted">Классы</span>
+            <strong>{{ summary.classes }}</strong>
+        </div>
+        <div class="metric">
+            <span class="muted">Преподаватели</span>
+            <strong>{{ summary.teachers }}</strong>
+        </div>
+        <div class="metric">
+            <span class="muted">Занятия на этой неделе</span>
+            <strong>{{ summary.lessons_this_week }}</strong>
+        </div>
+        <div class="metric">
+            <span class="muted">Закреплённые занятия</span>
+            <strong>{{ summary.locked_lessons }}</strong>
+        </div>
+    </div>
+</section>
 
 <div class="grid grid-2" style="margin-top: 1rem;">
     <section class="panel">
@@ -70,10 +49,6 @@
         {% if busiest_teachers %}
             <table>
                 <thead>
-                    <tr style="display:none;">
-                        <th>Преподаватель</th>
-                        <th>Всего занятий</th>
-                    </tr>
                     <tr>
                         <th>Преподаватель</th>
                         <th>За неделю</th>
@@ -84,7 +59,11 @@
                 <tbody>
                     {% for teacher in busiest_teachers %}
                         <tr>
-                            <td>{{ teacher }}</td>
+                            <td>
+                                <a href="{% url 'scheduler:teacher_detail' teacher.pk %}" style="font-weight: 700; color: var(--accent-dark);">
+                                    {{ teacher }}
+                                </a>
+                            </td>
                             <td>{{ teacher.lessons_week }}</td>
                             <td>{{ teacher.lessons_month }}</td>
                             <td>{{ teacher.total_lessons }}</td>
@@ -93,7 +72,7 @@
                 </tbody>
             </table>
         {% else %}
-            <div class="empty">Занятий пока нет. Заполните демо-данные и запустите генерацию расписания.</div>
+            <div class="empty">Занятий пока нет. Откройте недельный редактор и запустите пересчёт расписания там, когда будете готовы.</div>
         {% endif %}
     </section>
 </div>

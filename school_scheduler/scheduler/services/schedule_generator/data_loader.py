@@ -9,10 +9,10 @@ from scheduler.models import (
     Classroom,
     ClassSubject,
     Schedule,
-    TeacherAvailability,
     TeachingAssignment,
     TimeSlot,
     WeeklyClassSubjectLoad,
+    teacher_unavailability_pairs_for_week,
 )
 from .configuration import SchedulerSettings, load_scheduler_settings
 from .input_models import SchoolInputModel
@@ -214,8 +214,9 @@ def load_generation_context(
         for item in fixed_schedules
     ]
 
-    teacher_unavailability = set(
-        TeacherAvailability.objects.filter(is_available=False).values_list('teacher_id', 'time_slot_id')
+    teacher_unavailability = teacher_unavailability_pairs_for_week(
+        week_start=week_start,
+        time_slot_ids=[slot.id for slot in time_slots],
     )
 
     assignments = list(
