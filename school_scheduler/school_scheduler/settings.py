@@ -69,6 +69,12 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 AUTH_USER_MODEL = 'scheduler.User'
+
+# Маршруты аутентификации
+LOGIN_URL = 'scheduler:login'
+LOGIN_REDIRECT_URL = 'scheduler:dashboard'
+LOGOUT_REDIRECT_URL = 'scheduler:login'
+
 LANGUAGE_CODE = 'ru-ru'
 TIME_ZONE = 'Europe/Moscow'
 USE_I18N = True

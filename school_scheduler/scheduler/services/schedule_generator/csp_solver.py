@@ -170,12 +170,15 @@ class CspSeedGenerator:
                     placements.append((slot.id, room_id))
 
             if not placements:
+                # Smягчаем требования к типу кабинета, но НЕ к доступности преподавателя:
+                # учитель, отмеченный как болеет/выходной, не должен попасть в домен ни при каких условиях.
                 fallback = [
                     (slot.id, room_id)
                     for slot in self.context.time_slots
                     for room_id, room in self.context.classrooms.items()
                     if room.capacity >= requirement.min_capacity
                     and slot.start_time >= self.context.settings.school.start_time
+                    and (requirement.teacher_id, slot.id) not in self.context.teacher_unavailability
                 ]
                 placements = fallback
 

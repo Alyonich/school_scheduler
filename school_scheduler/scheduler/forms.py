@@ -11,15 +11,15 @@ def current_monday() -> date:
 
 
 class ScheduleGenerationForm(forms.Form):
-    class GenerationMode:
-        FAST = 'fast'
-        BALANCED = 'balanced'
-        QUALITY = 'quality'
-        CHOICES = [
-            (FAST, 'Быстро'),
-            (BALANCED, 'Сбалансированно'),
-            (QUALITY, 'Максимальное качество'),
-        ]
+    """Форма запуска генерации расписания.
+
+    Пользователь задаёт только лимит времени работы GA в минутах.
+    Поколения и популяции крутятся, пока:
+      * не найдена «идеальная» хромосома (hard_penalty=0 и нет окон между уроками), или
+      * не истёк лимит времени.
+    Лимит относится ИСКЛЮЧИТЕЛЬНО к циклу GA — CSP-инициализация,
+    финальный repair и сохранение в БД идут отдельно.
+    """
 
     week_start = forms.DateField(
         label='Начало недели',
@@ -33,11 +33,16 @@ class ScheduleGenerationForm(forms.Form):
         required=False,
         help_text='Оставьте пустым, чтобы сгенерировать расписание для всех классов.'
     )
-    generation_mode = forms.ChoiceField(
-        label='Режим генерации',
-        choices=GenerationMode.CHOICES,
-        initial=GenerationMode.BALANCED,
-        help_text='Выберите, что важнее: скорость расчёта или качество итогового расписания.'
+    time_limit_minutes = forms.FloatField(
+        label='Лимит времени работы GA, минут',
+        min_value=0.5,
+        max_value=120.0,
+        initial=5.0,
+        help_text=(
+            'Сколько минут разрешено перебирать популяции. '
+            'Если идеальное расписание найдётся раньше — генерация остановится досрочно. '
+            'Если время выйдет — возьмём лучший на тот момент вариант.'
+        ),
     )
 
     save_workload_as_default = forms.BooleanField(
@@ -51,23 +56,18 @@ class ScheduleGenerationForm(forms.Form):
         return value - timedelta(days=value.weekday())
 
     def get_generator_settings(self) -> dict[str, int | float]:
-        mode = self.cleaned_data['generation_mode']
-        if mode == self.GenerationMode.FAST:
-            return {
-                'population_size': 50,
-                'generations': 90,
-                'mutation_rate': 0.14,
-            }
-        if mode == self.GenerationMode.QUALITY:
-            return {
-                'population_size': 140,
-                'generations': 260,
-                'mutation_rate': 0.22,
-            }
+        """Параметры для GeneticScheduleGenerator.
+
+        Поскольку остановка теперь по времени, population_size и generations
+        выставлены умышленно с большим запасом — реально ограничителем будет
+        ga_time_limit_seconds.
+        """
+        minutes = float(self.cleaned_data['time_limit_minutes'])
         return {
-            'population_size': 90,
-            'generations': 180,
+            'population_size': 120,
+            'generations': 100_000,
             'mutation_rate': 0.18,
+            'ga_time_limit_seconds': minutes * 60.0,
         }
 
 

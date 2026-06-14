@@ -7,8 +7,9 @@ import threading
 
 from django.conf import settings
 from django.contrib import messages
-from django.core.exceptions import ValidationError
-from django.db import OperationalError, close_old_connections, transaction
+from django.contrib.auth.decorators import login_required
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import IntegrityError, OperationalError, close_old_connections, transaction
 from django.db.models import Count, Q
 from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -33,16 +34,24 @@ from .models import (
     AvailabilityStatus,
     Class,
     ClassSubject,
+    Classroom,
     Schedule,
     ScheduleChange,
     ScheduleChangeType,
     Teacher,
     TeacherAvailability,
+    TeachingAssignment,
     TimeSlot,
+    UserRole,
     WeeklyClassSubjectLoad,
     Weekday,
     normalize_week_start,
     teacher_availability_map_for_week,
+)
+from .exports import ExportContext, SUPPORTED_FORMATS, export_grid
+from .permissions import (
+    can_edit_teacher_availability,
+    dispatcher_required,
 )
 from .services.schedule_generator import GeneticScheduleGenerator
 
@@ -104,6 +113,8 @@ def _release_generation_process_lock(lock_handle) -> None:
 
 
 def dashboard(request: HttpRequest) -> HttpResponse:
+    if not request.user.is_authenticated:
+        return redirect('scheduler:timetable')
     filter_form = ScheduleFilterForm(request.GET or None)
     filter_form.is_valid()
     week_start = _filter_week_start(filter_form)
@@ -167,23 +178,58 @@ def timetable(request: HttpRequest) -> HttpResponse:
     selected_class = _filter_value(filter_form, 'class_obj')
     selected_teacher = _filter_value(filter_form, 'teacher')
 
-    schedules = (
+    schedules_qs = (
         Schedule.objects.select_related('class_obj', 'subject', 'teacher__user', 'classroom', 'time_slot__lesson_time')
         .filter(lesson_date__gte=week_start, lesson_date__lt=week_start + timedelta(days=5))
         .order_by('time_slot__lesson_time__lesson_number', 'lesson_date')
     )
-    if selected_class:
-        schedules = schedules.filter(class_obj=selected_class)
-    if selected_teacher:
-        schedules = schedules.filter(teacher=selected_teacher)
-    if not selected_class and not selected_teacher:
-        selected_class = Class.objects.order_by('grade', 'parallel').first()
-        if selected_class:
-            schedules = schedules.filter(class_obj=selected_class)
 
-    grid = build_week_grid(schedules, week_start)
+    # --- Общее расписание (видно всем, в том числе неавторизованным) ---
+    general_schedules = schedules_qs
+    if selected_class:
+        general_schedules = general_schedules.filter(class_obj=selected_class)
+    if selected_teacher:
+        general_schedules = general_schedules.filter(teacher=selected_teacher)
+    if not selected_class and not selected_teacher:
+        first_class = Class.objects.order_by('grade', 'parallel').first()
+        if first_class:
+            selected_class = first_class
+            general_schedules = general_schedules.filter(class_obj=first_class)
+
+    grid = build_week_grid(general_schedules, week_start)
     timetable_scope_label = _build_timetable_scope_label(selected_class, selected_teacher)
     workload_classes = _build_workload_classes(week_start=week_start)
+
+    # --- Личное расписание для авторизованных пользователей ---
+    personal_grid = None
+    personal_scope_label = ''
+    personal_role = None
+    personal_target = None
+    user = request.user
+    if user.is_authenticated:
+        if user.role == UserRole.STUDENT and user.class_obj_id:
+            personal_role = 'student'
+            personal_target = user.class_obj
+            personal_schedules = (
+                schedules_qs.filter(class_obj=user.class_obj)
+            )
+            personal_grid = build_week_grid(personal_schedules, week_start)
+            personal_scope_label = (
+                f'Ваше личное расписание (класс {user.class_obj.name}).'
+            )
+        elif user.role == UserRole.TEACHER:
+            teacher_profile = Teacher.objects.select_related('user').filter(user=user).first()
+            if teacher_profile is not None:
+                personal_role = 'teacher'
+                personal_target = teacher_profile
+                personal_schedules = (
+                    schedules_qs.filter(teacher=teacher_profile)
+                )
+                personal_grid = build_week_grid(personal_schedules, week_start)
+                personal_scope_label = (
+                    'Ваше личное расписание (уроки, которые вы должны провести).'
+                )
+
     return render(
         request,
         'scheduler/timetable.html',
@@ -199,14 +245,88 @@ def timetable(request: HttpRequest) -> HttpResponse:
             'generation_form': ScheduleGenerationForm(
                 initial={
                     'week_start': week_start,
-                    'generation_mode': ScheduleGenerationForm.GenerationMode.BALANCED,
                 }
             ),
             'active_generation_job': get_active_generation_job(),
+            'personal_grid': personal_grid,
+            'personal_scope_label': personal_scope_label,
+            'personal_role': personal_role,
+            'personal_target': personal_target,
         },
     )
 
 
+def timetable_export(request: HttpRequest) -> HttpResponse:
+    """Экспорт текущего вида расписания в Excel или PDF.
+
+    Использует те же фильтры, что и view `timetable`. Формат файла берётся
+    из query-параметра ?format=xlsx|pdf (по умолчанию xlsx).
+    """
+    fmt = (request.GET.get('format') or 'xlsx').lower().strip()
+    if fmt not in SUPPORTED_FORMATS:
+        messages.error(
+            request,
+            f'Неподдерживаемый формат экспорта: {fmt!r}. Доступны: {", ".join(SUPPORTED_FORMATS)}.',
+        )
+        redirect_url = reverse('scheduler:timetable')
+        query_string = request.GET.urlencode()
+        if query_string:
+            redirect_url = f'{redirect_url}?{query_string}'
+        return redirect(redirect_url)
+
+    filter_form = ScheduleFilterForm(request.GET or None)
+    filter_form.is_valid()
+    week_start = _filter_week_start(filter_form)
+    selected_class = _filter_value(filter_form, 'class_obj')
+    selected_teacher = _filter_value(filter_form, 'teacher')
+
+    schedules = (
+        Schedule.objects.select_related('class_obj', 'subject', 'teacher__user', 'classroom', 'time_slot__lesson_time')
+        .filter(lesson_date__gte=week_start, lesson_date__lt=week_start + timedelta(days=5))
+        .order_by('time_slot__lesson_time__lesson_number', 'lesson_date')
+    )
+    if selected_class:
+        schedules = schedules.filter(class_obj=selected_class)
+    if selected_teacher:
+        schedules = schedules.filter(teacher=selected_teacher)
+    if not selected_class and not selected_teacher:
+        selected_class = Class.objects.order_by('grade', 'parallel').first()
+        if selected_class:
+            schedules = schedules.filter(class_obj=selected_class)
+
+    grid = build_week_grid(schedules, week_start)
+    scope_label = _build_timetable_scope_label(selected_class, selected_teacher)
+    ctx = ExportContext(
+        week_start=week_start,
+        scope_label=scope_label,
+        show_class_in_cell=selected_class is None,
+    )
+
+    try:
+        data, filename, content_type = export_grid(grid, ctx, fmt)
+    except Exception as exc:  # noqa: BLE001 — пользователю даём дружелюбную ошибку
+        messages.error(
+            request,
+            f'Не удалось сформировать файл расписания: {exc}',
+        )
+        redirect_url = reverse('scheduler:timetable')
+        query_string = request.GET.urlencode()
+        if query_string:
+            redirect_url = f'{redirect_url}?{query_string}'
+        return redirect(redirect_url)
+
+    response = HttpResponse(data, content_type=content_type)
+    # RFC 5987 — корректное имя файла с кириллицей.
+    from urllib.parse import quote
+    response['Content-Disposition'] = (
+        f"attachment; filename=\"{filename}\"; "
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    response['Content-Length'] = str(len(data))
+    return response
+
+
+@login_required
 def teacher_detail(request: HttpRequest, pk: int) -> HttpResponse:
     teacher = get_object_or_404(
         Teacher.objects.select_related('user'),
@@ -220,23 +340,31 @@ def teacher_detail(request: HttpRequest, pk: int) -> HttpResponse:
         weekday_numbers=[weekday for weekday, _label in weekday_choices],
     )
 
+    # Право менять доступность: только сам преподаватель, диспетчер или администратор.
+    can_edit_availability = can_edit_teacher_availability(request.user, teacher)
+
     form = TeacherWeeklyAvailabilityForm(
         request.POST or None,
         weekday_choices=weekday_choices,
         initial_statuses=day_statuses,
     )
-    if request.method == 'POST' and form.is_valid():
-        _save_teacher_weekday_statuses(
-            teacher=teacher,
-            week_start=week_start,
-            day_statuses=form.cleaned_statuses(),
-        )
-        messages.success(
-            request,
-            'Доступность преподавателя для выбранной недели обновлена. Эти настройки уже влияют на генерацию и ручное редактирование расписания.',
-        )
-        redirect_url = reverse('scheduler:teacher_detail', args=[teacher.pk])
-        return redirect(f'{redirect_url}?week_start={week_start.isoformat()}')
+    if request.method == 'POST':
+        if not can_edit_availability:
+            raise PermissionDenied(
+                'Изменять доступность можно только для своего профиля.'
+            )
+        if form.is_valid():
+            _save_teacher_weekday_statuses(
+                teacher=teacher,
+                week_start=week_start,
+                day_statuses=form.cleaned_statuses(),
+            )
+            messages.success(
+                request,
+                'Доступность преподавателя для выбранной недели обновлена. Эти настройки уже влияют на генерацию и ручное редактирование расписания.',
+            )
+            redirect_url = reverse('scheduler:teacher_detail', args=[teacher.pk])
+            return redirect(f'{redirect_url}?week_start={week_start.isoformat()}')
 
     assignments = list(
         teacher.teaching_assignments.select_related('class_obj', 'subject')
@@ -289,6 +417,7 @@ def teacher_detail(request: HttpRequest, pk: int) -> HttpResponse:
             'week_schedule': week_schedule,
             'previous_week_start': week_start - timedelta(days=7),
             'next_week_start': week_start + timedelta(days=7),
+            'can_edit_availability': can_edit_availability,
         },
     )
 
@@ -443,6 +572,7 @@ def generate_timetable(request: HttpRequest) -> HttpResponse:
     return redirect(redirect_url)
 
 
+@dispatcher_required
 def start_generation(request: HttpRequest) -> HttpResponse:
     if request.method != 'POST':
         return redirect('scheduler:dashboard')
@@ -543,6 +673,7 @@ def start_generation(request: HttpRequest) -> HttpResponse:
     return redirect('scheduler:generation_progress', job_id=job.job_id)
 
 
+@dispatcher_required
 def generation_progress(request: HttpRequest, job_id: str) -> HttpResponse:
     job = get_generation_job(job_id)
     if job is None:
@@ -559,6 +690,7 @@ def generation_progress(request: HttpRequest, job_id: str) -> HttpResponse:
     )
 
 
+@dispatcher_required
 def generation_status(request: HttpRequest, job_id: str) -> JsonResponse:
     job = get_generation_job(job_id)
     if job is None:
@@ -566,6 +698,7 @@ def generation_status(request: HttpRequest, job_id: str) -> JsonResponse:
     return JsonResponse(job.to_payload())
 
 
+@dispatcher_required
 def generation_events(request: HttpRequest, job_id: str) -> HttpResponse:
     job = get_generation_job(job_id)
     if job is None:
@@ -704,6 +837,7 @@ def _build_generation_result_url(*, week_start: date, class_ids: list[int]) -> s
     return f'{redirect_url}?week_start={week_start.isoformat()}'
 
 
+@dispatcher_required
 def schedule_create(request: HttpRequest) -> HttpResponse:
     initial = _entry_initial(request)
     form = ScheduleEntryForm(request.POST or None, initial=initial)
@@ -720,6 +854,7 @@ def schedule_create(request: HttpRequest) -> HttpResponse:
     return render(request, 'scheduler/schedule_form.html', {'form': form, 'title': 'Создать занятие'})
 
 
+@dispatcher_required
 def schedule_edit(request: HttpRequest, pk: int) -> HttpResponse:
     schedule = get_object_or_404(Schedule, pk=pk)
     original_teacher_id = schedule.teacher_id
@@ -742,6 +877,7 @@ def schedule_edit(request: HttpRequest, pk: int) -> HttpResponse:
     return render(request, 'scheduler/schedule_form.html', {'form': form, 'title': 'Редактировать занятие', 'schedule': schedule})
 
 
+@dispatcher_required
 def schedule_delete(request: HttpRequest, pk: int) -> HttpResponse:
     schedule = get_object_or_404(Schedule, pk=pk)
     if request.method == 'POST':
@@ -757,6 +893,578 @@ def schedule_delete(request: HttpRequest, pk: int) -> HttpResponse:
     return render(request, 'scheduler/schedule_confirm_delete.html', {'schedule': schedule})
 
 
+# === Страница «Конфликты и окна» ============================================
+
+CONFLICTS_SESSION_KEY = 'conflicts_unlocked_for_week'
+CONFLICT_DAY_PREVIEW_SESSION_KEY = 'conflict_day_substitution_preview'
+
+
+@dispatcher_required
+def schedule_conflicts(request: HttpRequest) -> HttpResponse:
+    """Показывает классы, у которых в недельном расписании есть окна между
+    уроками или поздний старт дня (первый урок не №1).
+
+    Побочный эффект: записывает в сессию маркер `conflicts_unlocked_for_week`
+    — он используется в `conflict_day_view`, чтобы запретить прямой доступ к
+    специальному сплит-виду дня без перехода через эту страницу.
+    """
+    week_start = _query_week_start(request)
+    week_end = week_start + timedelta(days=5)
+
+    schedules = list(
+        Schedule.objects.select_related(
+            'class_obj',
+            'subject',
+            'teacher__user',
+            'classroom',
+            'time_slot__lesson_time',
+        )
+        .filter(lesson_date__gte=week_start, lesson_date__lt=week_end)
+        .order_by('class_obj__grade', 'class_obj__parallel', 'lesson_date', 'time_slot__lesson_time__lesson_number')
+    )
+
+    class_day_map: dict[int, dict[date, list]] = defaultdict(lambda: defaultdict(list))
+    class_lookup: dict[int, Class] = {}
+    for schedule in schedules:
+        class_day_map[schedule.class_obj_id][schedule.lesson_date].append(schedule)
+        class_lookup[schedule.class_obj_id] = schedule.class_obj
+
+    report_rows: list[dict] = []
+    for class_id, days in sorted(class_day_map.items(), key=lambda item: (class_lookup[item[0]].grade, class_lookup[item[0]].parallel)):
+        problem_days = []
+        for lesson_date in sorted(days.keys()):
+            day_schedules = days[lesson_date]
+            numbers = sorted({item.time_slot.lesson_time.lesson_number for item in day_schedules})
+            if not numbers:
+                continue
+            has_gap = (numbers[-1] - numbers[0] + 1) - len(numbers) > 0
+            has_late_start = numbers[0] > 1
+            if not (has_gap or has_late_start):
+                continue
+            gap_numbers = sorted(set(range(numbers[0], numbers[-1] + 1)) - set(numbers))
+            problem_days.append({
+                'date': lesson_date,
+                'weekday_label': _weekday_label(lesson_date.isoweekday()),
+                'lesson_numbers': numbers,
+                'has_gap': has_gap,
+                'has_late_start': has_late_start,
+                'gap_numbers': gap_numbers,
+                'first_lesson_number': numbers[0],
+            })
+        if problem_days:
+            report_rows.append({
+                'class_obj': class_lookup[class_id],
+                'problem_days': problem_days,
+            })
+
+    # Маркер сессии: разрешаем доступ к /conflicts/day/... только если пользователь
+    # реально побывал на этой странице за актуальную неделю.
+    request.session[CONFLICTS_SESSION_KEY] = week_start.isoformat()
+    request.session.modified = True
+
+    return render(
+        request,
+        'scheduler/conflicts.html',
+        {
+            'week_start': week_start,
+            'report_rows': report_rows,
+            'has_problems': bool(report_rows),
+        },
+    )
+
+
+def _conflict_day_url(*, class_id: int, lesson_date: date) -> str:
+    return reverse(
+        'scheduler:conflict_day_view',
+        kwargs={'class_id': class_id, 'lesson_date': lesson_date.isoformat()},
+    )
+
+
+def _get_conflict_day_preview(
+    request: HttpRequest,
+    *,
+    class_id: int,
+    lesson_date: date,
+) -> dict | None:
+    payload = request.session.get(CONFLICT_DAY_PREVIEW_SESSION_KEY)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get('class_id') != class_id:
+        return None
+    if payload.get('lesson_date') != lesson_date.isoformat():
+        return None
+    items = payload.get('items')
+    if not isinstance(items, list) or not items:
+        return None
+    return payload
+
+
+def _set_conflict_day_preview(request: HttpRequest, payload: dict) -> None:
+    request.session[CONFLICT_DAY_PREVIEW_SESSION_KEY] = payload
+    request.session.modified = True
+
+
+def _clear_conflict_day_preview(request: HttpRequest) -> None:
+    request.session.pop(CONFLICT_DAY_PREVIEW_SESSION_KEY, None)
+    request.session.modified = True
+
+
+def _build_conflict_day_substitution_preview(*, class_obj: Class, target_date: date) -> tuple[dict | None, str | None]:
+    class_day_lessons = list(
+        Schedule.objects.select_related('subject', 'teacher__user', 'classroom', 'time_slot__lesson_time')
+        .filter(class_obj=class_obj, lesson_date=target_date)
+        .order_by('time_slot__lesson_time__lesson_number', 'id')
+    )
+    if not class_day_lessons:
+        return None, 'Для этого класса в выбранный день нет занятий.'
+
+    weekday = target_date.isoweekday()
+    day_slots = list(
+        TimeSlot.objects.select_related('lesson_time')
+        .filter(weekday=weekday, lesson_time__day_type='normal')
+        .order_by('lesson_time__lesson_number')
+    )
+    if len(day_slots) < len(class_day_lessons):
+        return None, 'На этот день не хватает временных слотов для уплотнения расписания.'
+
+    target_slots = day_slots[:len(class_day_lessons)]
+    target_slot_ids = [slot.id for slot in target_slots]
+    lesson_ids = [item.id for item in class_day_lessons]
+    subject_ids = sorted({item.subject_id for item in class_day_lessons})
+
+    class_assignment_pairs = set(
+        TeachingAssignment.objects.filter(class_obj=class_obj, subject_id__in=subject_ids)
+        .values_list('subject_id', 'teacher_id')
+    )
+
+    # Кандидаты по предмету: сначала «родной» учитель урока, затем остальные предметники.
+    subject_teacher_candidates: dict[int, list[int]] = defaultdict(list)
+    for subject_id, teacher_id in (
+        TeachingAssignment.objects.filter(subject_id__in=subject_ids)
+        .values_list('subject_id', 'teacher_id')
+        .distinct()
+    ):
+        subject_teacher_candidates[subject_id].append(teacher_id)
+    for lesson in class_day_lessons:
+        teacher_list = subject_teacher_candidates[lesson.subject_id]
+        if lesson.teacher_id in teacher_list:
+            teacher_list.remove(lesson.teacher_id)
+        teacher_list.insert(0, lesson.teacher_id)
+
+    other_day_lessons = list(
+        Schedule.objects.select_related('class_obj', 'subject', 'teacher', 'classroom', 'time_slot__lesson_time')
+        .filter(lesson_date=target_date)
+        .exclude(pk__in=lesson_ids)
+    )
+    teacher_busy_slots = {(item.teacher_id, item.time_slot_id) for item in other_day_lessons}
+    room_busy_slots = {(item.classroom_id, item.time_slot_id) for item in other_day_lessons}
+
+    teacher_day_load: dict[int, int] = defaultdict(int)
+    for item in other_day_lessons:
+        teacher_day_load[item.teacher_id] += 1
+
+    all_candidate_teacher_ids = sorted(
+        {
+            teacher_id
+            for teacher_ids in subject_teacher_candidates.values()
+            for teacher_id in teacher_ids
+        }
+    )
+    availability_map = teacher_availability_map_for_week(
+        week_start=target_date,
+        teacher_ids=all_candidate_teacher_ids,
+        time_slot_ids=target_slot_ids,
+    )
+
+    teacher_lookup = {
+        teacher.id: teacher
+        for teacher in Teacher.objects.select_related('user').filter(id__in=all_candidate_teacher_ids)
+    }
+    room_lookup = {room.id: room for room in Classroom.objects.all()}
+
+    lessons_pool = class_day_lessons.copy()
+    assignments_by_slot: dict[int, tuple[int, int, int]] = {}
+
+    def _teacher_candidates_for(lesson: Schedule, slot_id: int) -> list[int]:
+        candidates = []
+        for teacher_id in subject_teacher_candidates.get(lesson.subject_id, []):
+            if (teacher_id, slot_id) in teacher_busy_slots:
+                continue
+            status = availability_map.get((teacher_id, slot_id), AvailabilityStatus.WORKING)
+            if status != AvailabilityStatus.WORKING:
+                continue
+            candidates.append(teacher_id)
+        candidates.sort(
+            key=lambda teacher_id: (
+                teacher_id != lesson.teacher_id,
+                (lesson.subject_id, teacher_id) not in class_assignment_pairs,
+                teacher_day_load.get(teacher_id, 0),
+            )
+        )
+        return candidates
+
+    def _room_candidates_for(lesson: Schedule, slot_id: int) -> list[int]:
+        subject = lesson.subject
+        candidates = []
+        for room in room_lookup.values():
+            if room.room_type != subject.required_room_type:
+                continue
+            if room.capacity < class_obj.students_count:
+                continue
+            if (room.id, slot_id) in room_busy_slots:
+                continue
+            candidates.append(room.id)
+        candidates.sort(key=lambda room_id: (room_id != lesson.classroom_id, str(room_lookup[room_id].name)))
+        return candidates
+
+    def _build_slot_options(lesson_index: int, slot_id: int) -> list[tuple[int, int]]:
+        lesson = lessons_pool[lesson_index]
+        teacher_ids = _teacher_candidates_for(lesson, slot_id)
+        room_ids = _room_candidates_for(lesson, slot_id)
+        options: list[tuple[int, int]] = []
+        for teacher_id in teacher_ids:
+            for room_id in room_ids:
+                options.append((teacher_id, room_id))
+        return options
+
+    def _search(slot_index: int, remaining_lesson_indexes: list[int]) -> bool:
+        if slot_index >= len(target_slots):
+            return True
+
+        slot = target_slots[slot_index]
+        lesson_options: list[tuple[int, list[tuple[int, int]]]] = []
+        for lesson_index in remaining_lesson_indexes:
+            options = _build_slot_options(lesson_index, slot.id)
+            if options:
+                lesson_options.append((lesson_index, options))
+
+        if not lesson_options:
+            return False
+
+        lesson_options.sort(key=lambda item: len(item[1]))
+        for lesson_index, options in lesson_options:
+            for teacher_id, room_id in options:
+                assignments_by_slot[slot.id] = (lesson_index, teacher_id, room_id)
+                next_remaining = [idx for idx in remaining_lesson_indexes if idx != lesson_index]
+                if _search(slot_index + 1, next_remaining):
+                    return True
+                assignments_by_slot.pop(slot.id, None)
+        return False
+
+    if not _search(0, list(range(len(lessons_pool)))):
+        return None, (
+            'Не удалось подобрать вариант без окон на этот день. '
+            'Проверьте занятость учителей и кабинетов в выбранную дату.'
+        )
+
+    items: list[dict] = []
+    teacher_substitutions = 0
+    external_substitutions = 0
+    for slot in target_slots:
+        lesson_index, teacher_id, room_id = assignments_by_slot[slot.id]
+        source_lesson = lessons_pool[lesson_index]
+        teacher_obj = teacher_lookup.get(teacher_id)
+        room_obj = room_lookup.get(room_id)
+        is_teacher_substitution = teacher_id != source_lesson.teacher_id
+        is_external_substitution = (source_lesson.subject_id, teacher_id) not in class_assignment_pairs
+        if is_teacher_substitution:
+            teacher_substitutions += 1
+        if is_external_substitution:
+            external_substitutions += 1
+        items.append(
+            {
+                'schedule_id': source_lesson.id,
+                'subject_id': source_lesson.subject_id,
+                'subject_name': source_lesson.subject.name,
+                'old_teacher_id': source_lesson.teacher_id,
+                'old_teacher_name': str(source_lesson.teacher),
+                'new_teacher_id': teacher_id,
+                'new_teacher_name': str(teacher_obj) if teacher_obj else f'ID {teacher_id}',
+                'old_time_slot_id': source_lesson.time_slot_id,
+                'old_lesson_number': source_lesson.time_slot.lesson_time.lesson_number,
+                'new_time_slot_id': slot.id,
+                'new_lesson_number': slot.lesson_time.lesson_number,
+                'old_classroom_id': source_lesson.classroom_id,
+                'old_classroom_name': source_lesson.classroom.name,
+                'new_classroom_id': room_id,
+                'new_classroom_name': room_obj.name if room_obj else f'ID {room_id}',
+                'is_teacher_substitution': is_teacher_substitution,
+                'is_external_substitution': is_external_substitution,
+            }
+        )
+
+    items.sort(key=lambda row: (row['new_lesson_number'], row['subject_name'], row['schedule_id']))
+    payload = {
+        'class_id': class_obj.id,
+        'class_name': class_obj.name,
+        'lesson_date': target_date.isoformat(),
+        'weekday_label': _weekday_label(target_date.isoweekday()),
+        'items': items,
+        'summary': {
+            'lessons_total': len(items),
+            'teacher_substitutions': teacher_substitutions,
+            'external_substitutions': external_substitutions,
+        },
+    }
+    return payload, None
+
+
+def _apply_conflict_day_substitution_preview(*, class_obj: Class, target_date: date, preview_payload: dict) -> tuple[int, int]:
+    items = preview_payload.get('items') or []
+    if not items:
+        raise ValidationError('Пустой предпросмотр замены.')
+
+    preview_ids = {int(item['schedule_id']) for item in items}
+    current_day_lessons = list(
+        Schedule.objects.select_related('subject', 'teacher__user', 'classroom', 'time_slot__lesson_time')
+        .filter(class_obj=class_obj, lesson_date=target_date)
+        .order_by('time_slot__lesson_time__lesson_number', 'id')
+    )
+    current_day_ids = {item.id for item in current_day_lessons}
+    if preview_ids != current_day_ids:
+        raise ValidationError(
+            'Состав расписания этого дня изменился после предпросмотра. '
+            'Сформируйте предпросмотр заново.'
+        )
+
+    lesson_lookup = {item.id: item for item in current_day_lessons}
+    target_slot_ids = [int(item['new_time_slot_id']) for item in items]
+    autogenerated_note = (
+        f'Автоматическая замена на {target_date.strftime("%d.%m.%Y")} '
+        f'через страницу «Конфликты и окна».'
+    )
+
+    teacher_substitutions = 0
+    created_schedules: list[Schedule] = []
+    for item in items:
+        source = lesson_lookup[int(item['schedule_id'])]
+        if bool(item.get('is_teacher_substitution')):
+            teacher_substitutions += 1
+        source_note = (source.note or '').strip()
+        note_value = f'{source_note} {autogenerated_note}'.strip()
+        if len(note_value) > 255:
+            note_value = note_value[:255]
+        created_schedules.append(
+            Schedule(
+                class_obj=source.class_obj,
+                subject=source.subject,
+                teacher_id=int(item['new_teacher_id']),
+                classroom_id=int(item['new_classroom_id']),
+                time_slot_id=int(item['new_time_slot_id']),
+                lesson_date=target_date,
+                is_locked=source.is_locked,
+                note=note_value,
+            )
+        )
+
+    with transaction.atomic():
+        Schedule.objects.filter(id__in=list(current_day_ids)).delete()
+        Schedule.objects.bulk_create(created_schedules, batch_size=100)
+
+        created_by_slot = {
+            schedule.time_slot_id: schedule
+            for schedule in Schedule.objects.filter(
+                class_obj=class_obj,
+                lesson_date=target_date,
+                time_slot_id__in=target_slot_ids,
+            )
+        }
+        changes: list[ScheduleChange] = []
+        for item in items:
+            schedule = created_by_slot.get(int(item['new_time_slot_id']))
+            if schedule is None:
+                continue
+            lesson_no = int(item.get('new_lesson_number') or 0)
+            change_type = (
+                ScheduleChangeType.TEACHER_SUBSTITUTION
+                if bool(item.get('is_teacher_substitution'))
+                else ScheduleChangeType.RESCHEDULE
+            )
+            description = (
+                f'Автоматическая замена для {class_obj.name} на {target_date.strftime("%d.%m.%Y")}: '
+                f'урок №{lesson_no}, предмет «{item.get("subject_name", "")}», '
+                f'учитель: {item.get("old_teacher_name", "")} → {item.get("new_teacher_name", "")}.'
+            )
+            changes.append(
+                ScheduleChange(
+                    schedule=schedule,
+                    change_type=change_type,
+                    description=description[:5000],
+                )
+            )
+        if changes:
+            ScheduleChange.objects.bulk_create(changes, batch_size=100)
+
+    return len(items), teacher_substitutions
+
+
+@dispatcher_required
+def conflict_day_view(request: HttpRequest, class_id: int, lesson_date: str) -> HttpResponse:
+    """Сплит-вид: слева — день одного класса, справа — расписание учителей
+    этого класса на тот же день.
+
+    Доступ ТОЛЬКО для пользователей, прошедших через `schedule_conflicts`.
+    Это инвариант проверяется по маркеру сессии.
+    """
+    try:
+        target_date = date.fromisoformat(lesson_date)
+    except ValueError:
+        messages.warning(request, 'Некорректная дата урока.')
+        return redirect('scheduler:schedule_conflicts')
+
+    week_start = target_date - timedelta(days=target_date.weekday())
+    expected_marker = week_start.isoformat()
+    actual_marker = request.session.get(CONFLICTS_SESSION_KEY)
+    if actual_marker != expected_marker:
+        messages.info(
+            request,
+            'Этот вид доступен только из страницы «Конфликты и окна». '
+            'Откройте её для нужной недели, а затем перейдите на день.',
+        )
+        return redirect(f"{reverse('scheduler:schedule_conflicts')}?week_start={week_start.isoformat()}")
+
+    class_obj = get_object_or_404(Class, pk=class_id)
+
+    if request.method == 'POST':
+        action = (request.POST.get('action') or '').strip()
+        if action == 'generate_substitution_preview':
+            preview_payload, error_text = _build_conflict_day_substitution_preview(
+                class_obj=class_obj,
+                target_date=target_date,
+            )
+            if error_text:
+                messages.warning(request, error_text)
+                _clear_conflict_day_preview(request)
+            else:
+                _set_conflict_day_preview(request, preview_payload)
+                summary = preview_payload.get('summary', {})
+                messages.success(
+                    request,
+                    'Сформирован предпросмотр на день: '
+                    f"{summary.get('lessons_total', 0)} уроков, "
+                    f"замен учителя {summary.get('teacher_substitutions', 0)}, "
+                    f"временных внешних замен {summary.get('external_substitutions', 0)}. "
+                    'Расписание пока не сохранено.',
+                )
+            return redirect(_conflict_day_url(class_id=class_id, lesson_date=target_date))
+
+        if action == 'apply_substitution_preview':
+            preview_payload = _get_conflict_day_preview(
+                request,
+                class_id=class_id,
+                lesson_date=target_date,
+            )
+            if not preview_payload:
+                messages.warning(request, 'Нет актуального предпросмотра для сохранения. Сначала выполните генерацию.')
+                return redirect(_conflict_day_url(class_id=class_id, lesson_date=target_date))
+            try:
+                changed_count, teacher_substitutions = _apply_conflict_day_substitution_preview(
+                    class_obj=class_obj,
+                    target_date=target_date,
+                    preview_payload=preview_payload,
+                )
+            except ValidationError as exc:
+                messages.warning(request, str(exc))
+            except (IntegrityError, OperationalError):
+                messages.error(
+                    request,
+                    'Не удалось сохранить сгенерированные замены: данные дня могли измениться параллельно. '
+                    'Попробуйте сформировать предпросмотр ещё раз.',
+                )
+            else:
+                messages.success(
+                    request,
+                    f'Сохранено {changed_count} уроков на этот день. '
+                    f'Замен учителя: {teacher_substitutions}.',
+                )
+                _clear_conflict_day_preview(request)
+            return redirect(_conflict_day_url(class_id=class_id, lesson_date=target_date))
+
+        if action == 'discard_substitution_preview':
+            _clear_conflict_day_preview(request)
+            messages.info(request, 'Предпросмотр замен очищен. Текущее расписание не изменялось.')
+            return redirect(_conflict_day_url(class_id=class_id, lesson_date=target_date))
+
+    substitution_preview = _get_conflict_day_preview(
+        request,
+        class_id=class_id,
+        lesson_date=target_date,
+    )
+
+    class_day_lessons = list(
+        Schedule.objects.select_related('subject', 'teacher__user', 'classroom', 'time_slot__lesson_time')
+        .filter(class_obj=class_obj, lesson_date=target_date)
+        .order_by('time_slot__lesson_time__lesson_number')
+    )
+
+    teacher_ids = list(
+        class_obj.teaching_assignments.values_list('teacher_id', flat=True).distinct()
+    )
+    teachers = list(
+        Teacher.objects.select_related('user')
+        .filter(pk__in=teacher_ids)
+        .order_by('user__full_name')
+    )
+
+    teacher_day_schedules = list(
+        Schedule.objects.select_related('class_obj', 'subject', 'classroom', 'time_slot__lesson_time')
+        .filter(teacher_id__in=teacher_ids, lesson_date=target_date)
+        .order_by('teacher_id', 'time_slot__lesson_time__lesson_number')
+    )
+
+    teacher_blocks: list[dict] = []
+    by_teacher: dict[int, list] = defaultdict(list)
+    for item in teacher_day_schedules:
+        by_teacher[item.teacher_id].append(item)
+    for teacher in teachers:
+        teacher_blocks.append({
+            'teacher': teacher,
+            'lessons': by_teacher.get(teacher.pk, []),
+        })
+
+    class_numbers = sorted({lesson.time_slot.lesson_time.lesson_number for lesson in class_day_lessons})
+    has_gap = False
+    has_late_start = False
+    if class_numbers:
+        has_gap = (class_numbers[-1] - class_numbers[0] + 1) - len(class_numbers) > 0
+        has_late_start = class_numbers[0] > 1
+
+    preview_items: list[dict] = []
+    preview_numbers: list[int] = []
+    preview_has_gap = False
+    preview_has_late_start = False
+    if substitution_preview:
+        preview_items = sorted(
+            substitution_preview.get('items', []),
+            key=lambda row: row.get('new_lesson_number', 0),
+        )
+        preview_numbers = sorted({int(item.get('new_lesson_number', 0)) for item in preview_items if item.get('new_lesson_number')})
+        if preview_numbers:
+            preview_has_gap = (preview_numbers[-1] - preview_numbers[0] + 1) - len(preview_numbers) > 0
+            preview_has_late_start = preview_numbers[0] > 1
+
+    return render(
+        request,
+        'scheduler/conflicts_day.html',
+        {
+            'class_obj': class_obj,
+            'lesson_date': target_date,
+            'weekday_label': _weekday_label(target_date.isoweekday()),
+            'week_start': week_start,
+            'class_day_lessons': class_day_lessons,
+            'teacher_blocks': teacher_blocks,
+            'has_gap': has_gap,
+            'has_late_start': has_late_start,
+            'class_numbers': class_numbers,
+            'substitution_preview': substitution_preview,
+            'preview_items': preview_items,
+            'preview_numbers': preview_numbers,
+            'preview_has_gap': preview_has_gap,
+            'preview_has_late_start': preview_has_late_start,
+        },
+    )
+
+
 def build_week_grid(schedules, week_start: date) -> dict:
     weekday_names = {
         1: 'Понедельник',
@@ -764,6 +1472,13 @@ def build_week_grid(schedules, week_start: date) -> dict:
         3: 'Среда',
         4: 'Четверг',
         5: 'Пятница',
+    }
+    weekday_short_names = {
+        1: 'пн',
+        2: 'вт',
+        3: 'ср',
+        4: 'чт',
+        5: 'пт',
     }
     month_names = {
         1: 'янв',
@@ -782,10 +1497,12 @@ def build_week_grid(schedules, week_start: date) -> dict:
     weekdays = []
     for offset in range(5):
         current_day = week_start + timedelta(days=offset)
+        iso_weekday = current_day.isoweekday()
         weekdays.append({
             'date': current_day,
-            'weekday': current_day.isoweekday(),
-            'label': f"{weekday_names[current_day.isoweekday()]}, {current_day.day:02d} {month_names[current_day.month]}",
+            'weekday': iso_weekday,
+            'short_name': weekday_short_names.get(iso_weekday, ''),
+            'label': f"{weekday_names[iso_weekday]}, {current_day.day:02d} {month_names[current_day.month]}",
         })
 
     row_map = {}

@@ -11,6 +11,11 @@
         </div>
         <div class="actions">
             <a class="button secondary" href="{{ job.result_url }}">К расписанию</a>
+            <a id="job-conflicts-link" class="button secondary"
+               href="{% url 'scheduler:schedule_conflicts' %}?week_start={{ job.week_start }}"
+               {% if job.state != 'completed' %}style="display:none;"{% endif %}>
+                Просмотреть конфликты и окна
+            </a>
             <a class="button secondary" href="{% url 'scheduler:dashboard' %}">На главную</a>
         </div>
     </div>
@@ -95,6 +100,7 @@
     const warningsNode = document.getElementById("job-warnings");
     const errorBoxNode = document.getElementById("job-error-box");
     const errorTextNode = document.getElementById("job-error-text");
+    const conflictsLinkNode = document.getElementById("job-conflicts-link");
 
     function renderEvents(events) {
         eventsNode.innerHTML = "";
@@ -147,6 +153,9 @@
             errorBoxNode.style.display = "none";
         }
 
+        if (conflictsLinkNode) {
+            conflictsLinkNode.style.display = data.state === "completed" ? "" : "none";
+        }
         if (data.state === "completed") {
             resultNoteNode.textContent = "Расписание построено. Можно открыть недельную сетку и проверить предупреждения ниже.";
         } else if (data.state === "failed") {

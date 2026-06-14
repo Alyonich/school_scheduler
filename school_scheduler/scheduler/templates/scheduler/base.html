@@ -1,272 +1,652 @@
 <!DOCTYPE html>
 {% load static %}
+{% load scheduler_extras %}
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f766e">
     <link rel="icon" type="image/svg+xml" href="{% static 'scheduler/favicon.svg' %}">
     <title>{% block title %}Школьное расписание{% endblock %}</title>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Source+Serif+4:wght@600&display=swap">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@500;600;700;800&family=JetBrains+Mono:wght@500&display=swap">
     <style>
+        /* ============ DESIGN TOKENS ============ */
         :root {
-            --bg: #f4efe7;
-            --panel: rgba(255, 252, 247, 0.88);
-            --line: rgba(51, 41, 31, 0.12);
-            --text: #2f241b;
-            --muted: #6f6256;
+            /* Цветовая палитра — спокойная, премиальная */
+            --bg-base: #f6f4ef;
+            --bg-grain: #f1ede5;
+            --surface: #ffffff;
+            --surface-2: #fbf9f4;
+            --surface-elevated: rgba(255, 255, 255, 0.92);
+            --surface-glass: rgba(255, 253, 248, 0.78);
+
+            --border: rgba(28, 22, 14, 0.08);
+            --border-strong: rgba(28, 22, 14, 0.16);
+
+            --text: #1c160e;
+            --text-soft: #4a4036;
+            --muted: #786e62;
+            --muted-soft: #a39a8d;
+
             --accent: #0f766e;
-            --accent-dark: #115e59;
-            --gold: #c98b34;
-            --danger: #b42318;
-            --success: #166534;
-            --shadow: 0 20px 40px rgba(63, 45, 24, 0.08);
+            --accent-hover: #115e59;
+            --accent-soft: rgba(15, 118, 110, 0.10);
+            --accent-ring: rgba(15, 118, 110, 0.22);
+
+            --gold: #b3791f;
+            --gold-soft: rgba(179, 121, 31, 0.12);
+
+            --success: #15803d;
+            --success-soft: rgba(21, 128, 61, 0.12);
+            --warning: #b45309;
+            --warning-soft: rgba(180, 83, 9, 0.12);
+            --danger: #b91c1c;
+            --danger-soft: rgba(185, 28, 28, 0.10);
+
+            /* Размеры */
+            --radius-xs: 8px;
+            --radius-sm: 12px;
+            --radius-md: 16px;
+            --radius-lg: 22px;
+            --radius-xl: 28px;
+            --radius-pill: 999px;
+
+            /* Тени — мягкие, многослойные */
+            --shadow-xs: 0 1px 2px rgba(28, 22, 14, 0.05);
+            --shadow-sm: 0 2px 8px rgba(28, 22, 14, 0.06), 0 1px 2px rgba(28, 22, 14, 0.04);
+            --shadow-md: 0 8px 24px rgba(28, 22, 14, 0.08), 0 2px 6px rgba(28, 22, 14, 0.04);
+            --shadow-lg: 0 24px 48px -12px rgba(28, 22, 14, 0.12), 0 8px 16px -6px rgba(28, 22, 14, 0.06);
+            --shadow-focus: 0 0 0 3px var(--accent-ring);
+
+            /* Анимация */
+            --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+            --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+            --transition-fast: 120ms var(--ease-out);
+            --transition: 200ms var(--ease-out);
+            --transition-slow: 320ms var(--ease-out);
+
+            /* Типографика */
+            --font-sans: "Inter", "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            --font-display: "Manrope", "Inter", sans-serif;
+            --font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
         }
 
-        * { box-sizing: border-box; }
+        /* ============ RESET ============ */
+        *, *::before, *::after { box-sizing: border-box; }
+        /* scroll-behavior: auto — переход по якорю мгновенный, без анимации
+           пролистывания. Иначе при фильтрации страница плавно проскролливается
+           через личное расписание, а пользователь хочет видеть сетку сразу. */
+        html { scroll-behavior: auto; -webkit-text-size-adjust: 100%; }
         body {
             margin: 0;
-            font-family: "Manrope", sans-serif;
+            font-family: var(--font-sans);
+            font-size: 15px;
+            line-height: 1.55;
             color: var(--text);
-            background:
-                radial-gradient(circle at top left, rgba(201, 139, 52, 0.18), transparent 30%),
-                radial-gradient(circle at top right, rgba(15, 118, 110, 0.2), transparent 34%),
-                linear-gradient(160deg, #f7f0e7 0%, #efe3d3 100%);
+            background: var(--bg-base);
+            background-image:
+                radial-gradient(ellipse 80% 50% at 20% 0%, rgba(15, 118, 110, 0.08), transparent 60%),
+                radial-gradient(ellipse 60% 40% at 90% 10%, rgba(179, 121, 31, 0.10), transparent 55%),
+                radial-gradient(ellipse 70% 50% at 50% 100%, rgba(15, 118, 110, 0.04), transparent 70%);
+            background-attachment: fixed;
             min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            text-rendering: optimizeLegibility;
+            font-feature-settings: "cv11", "ss01", "ss03";
         }
 
-        a { color: inherit; text-decoration: none; }
-        .shell { width: min(1200px, calc(100% - 2rem)); margin: 0 auto; padding: 1.25rem 0 2rem; }
+        /* ============ TYPOGRAPHY ============ */
+        h1, h2, h3, h4 {
+            font-family: var(--font-display);
+            font-weight: 700;
+            letter-spacing: -0.015em;
+            color: var(--text);
+            margin: 0 0 0.5rem;
+        }
+        h1 { font-size: clamp(1.5rem, 2.4vw, 2rem); line-height: 1.2; }
+        h2 { font-size: clamp(1.15rem, 1.7vw, 1.4rem); line-height: 1.3; }
+        h3 { font-size: 1.05rem; line-height: 1.35; }
+        p { margin: 0 0 0.75rem; }
+        p:last-child { margin-bottom: 0; }
+        a { color: var(--accent); text-decoration: none; transition: color var(--transition-fast); }
+        a:hover { color: var(--accent-hover); }
+        a:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-radius: 4px; }
+
+        ::selection { background: var(--accent-soft); color: var(--accent-hover); }
+
+        .muted { color: var(--muted); font-size: 0.92em; }
+        .text-soft { color: var(--text-soft); }
+
+        /* ============ LAYOUT ============ */
+        .shell {
+            width: min(1240px, calc(100% - 2rem));
+            margin: 0 auto;
+            padding: 1rem 0 3rem;
+        }
+
+        /* ============ TOPBAR ============ */
         .topbar {
+            position: sticky;
+            top: 0.75rem;
+            z-index: 50;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            gap: 1rem;
+            gap: 1.25rem;
             margin-bottom: 1.5rem;
-            padding: 1rem 1.2rem;
-            border: 1px solid var(--line);
-            border-radius: 24px;
-            background: var(--panel);
-            backdrop-filter: blur(12px);
-            box-shadow: var(--shadow);
+            padding: 0.85rem 1.1rem 0.85rem 1.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            background: var(--surface-glass);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            box-shadow: var(--shadow-md);
         }
 
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.7rem;
+            min-width: 0;
+        }
+
+        .brand-mark {
+            width: 38px;
+            height: 38px;
+            border-radius: 12px;
+            background: linear-gradient(140deg, var(--accent) 0%, var(--accent-hover) 60%, #064e4a 100%);
+            display: grid;
+            place-items: center;
+            color: white;
+            flex-shrink: 0;
+            box-shadow: 0 4px 12px -2px var(--accent-ring), inset 0 1px 0 rgba(255,255,255,0.2);
+        }
+        .brand-mark svg { width: 20px; height: 20px; }
+
+        .brand-text { min-width: 0; }
         .brand h1 {
+            font-size: 1.05rem;
             margin: 0;
-            font-family: "Source Serif 4", serif;
-            font-size: clamp(1.6rem, 2vw, 2.4rem);
+            line-height: 1.1;
+            font-weight: 800;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-
         .brand p {
-            margin: 0.25rem 0 0;
+            margin: 0.15rem 0 0;
+            font-size: 0.78rem;
             color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .nav {
             display: flex;
-            gap: 0.6rem;
+            gap: 0.35rem;
             flex-wrap: wrap;
+            align-items: center;
         }
 
-        .nav a, .button, button {
-            border: 0;
-            border-radius: 999px;
+        .nav-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.55rem 0.85rem;
+            border-radius: var(--radius-pill);
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-soft);
+            background: transparent;
+            border: 1px solid transparent;
+            transition: background var(--transition-fast), color var(--transition-fast),
+                        border-color var(--transition-fast), transform var(--transition-fast);
+            cursor: pointer;
+        }
+        .nav-link svg { width: 16px; height: 16px; opacity: 0.7; transition: opacity var(--transition-fast); }
+        .nav-link:hover {
+            background: var(--surface);
+            color: var(--text);
+            border-color: var(--border);
+        }
+        .nav-link:hover svg { opacity: 1; }
+        .nav-link.is-primary {
             background: var(--text);
             color: white;
-            padding: 0.75rem 1.15rem;
-            font-weight: 700;
-            cursor: pointer;
-            transition: transform 0.18s ease, background 0.18s ease;
+            border-color: var(--text);
         }
-
-        .nav a.secondary, .button.secondary {
-            background: white;
-            color: var(--text);
-            border: 1px solid var(--line);
-        }
-
-        .nav a:hover, .button:hover, button:hover {
+        .nav-link.is-primary svg { opacity: 1; }
+        .nav-link.is-primary:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
             transform: translateY(-1px);
-            background: var(--accent);
+        }
+        .nav-link:focus-visible {
+            outline: none;
+            box-shadow: var(--shadow-focus);
         }
 
-        .nav a.secondary:hover, .button.secondary:hover {
-            background: rgba(15, 118, 110, 0.08);
-            color: var(--accent-dark);
+        .nav-divider {
+            width: 1px;
+            height: 22px;
+            background: var(--border);
+            margin: 0 0.15rem;
         }
 
-        .messages { display: grid; gap: 0.75rem; margin-bottom: 1rem; }
+        .user-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.7rem 0.4rem 0.4rem;
+            border-radius: var(--radius-pill);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            font-size: 0.82rem;
+            color: var(--text-soft);
+        }
+        .user-avatar {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent), var(--gold));
+            color: white;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 0.7rem;
+            letter-spacing: 0.02em;
+            line-height: 1;
+            flex-shrink: 0;
+            overflow: hidden;
+            text-transform: uppercase;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 1px 2px rgba(28, 22, 14, 0.08);
+        }
+        .user-chip .role-tag {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--muted);
+        }
+
+        .logout-form { margin: 0; }
+        .logout-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.55rem 0.85rem;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text-soft);
+            border-radius: var(--radius-pill);
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all var(--transition-fast);
+        }
+        .logout-btn:hover {
+            background: var(--danger-soft);
+            color: var(--danger);
+            border-color: rgba(185, 28, 28, 0.25);
+        }
+        .logout-btn svg { width: 14px; height: 14px; }
+
+        /* ============ MESSAGES ============ */
+        .messages { display: grid; gap: 0.6rem; margin-bottom: 1.2rem; }
         .message {
-            padding: 0.9rem 1rem;
-            border-radius: 18px;
-            border: 1px solid var(--line);
-            background: var(--panel);
-            box-shadow: var(--shadow);
+            display: flex;
+            align-items: flex-start;
+            gap: 0.65rem;
+            padding: 0.85rem 1rem;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            background: var(--surface-elevated);
+            box-shadow: var(--shadow-sm);
+            font-size: 0.92rem;
+            animation: slideIn 280ms var(--ease-out);
         }
-        .message.success { border-color: rgba(22, 101, 52, 0.25); color: var(--success); }
-        .message.warning { border-color: rgba(201, 139, 52, 0.3); color: #8a5a14; }
-        .message.error { border-color: rgba(180, 35, 24, 0.25); color: var(--danger); }
-
-        .panel {
-            border: 1px solid var(--line);
-            border-radius: 28px;
-            background: var(--panel);
-            backdrop-filter: blur(10px);
-            box-shadow: var(--shadow);
-            padding: 1.35rem;
+        .message::before {
+            content: "";
+            display: block;
+            width: 4px;
+            align-self: stretch;
+            border-radius: 4px;
+            background: var(--muted);
         }
+        .message.success { color: var(--success); }
+        .message.success::before { background: var(--success); }
+        .message.warning { color: var(--warning); }
+        .message.warning::before { background: var(--warning); }
+        .message.error { color: var(--danger); }
+        .message.error::before { background: var(--danger); }
 
-        .grid { display: grid; gap: 1rem; }
-        .grid-2 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-        .grid-3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-
-        .metric {
-            border-radius: 22px;
-            padding: 1rem;
-            background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.7));
-            border: 1px solid rgba(15, 118, 110, 0.08);
-        }
-
-        .metric strong { display: block; font-size: 2rem; margin-top: 0.2rem; }
-        .muted { color: var(--muted); }
-        form { display: grid; gap: 1rem; }
-        .field { display: grid; gap: 0.35rem; }
-        label { font-weight: 700; }
-        input, select, textarea {
-            width: 100%;
-            padding: 0.8rem 0.95rem;
-            border-radius: 16px;
-            border: 1px solid var(--line);
-            background: rgba(255,255,255,0.92);
-            font: inherit;
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
-        input[type="checkbox"] {
-            width: auto;
-            padding: 0;
-            border: 0;
-            border-radius: 0;
+        /* ============ PANELS / CARDS ============ */
+        .panel, .card {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xl);
+            background: var(--surface-elevated);
+            backdrop-filter: blur(12px);
+            box-shadow: var(--shadow-sm);
+            padding: 1.5rem;
+            transition: box-shadow var(--transition), border-color var(--transition);
+        }
+        .panel:hover { box-shadow: var(--shadow-md); }
+
+        .panel h2, .card h2 { margin-top: 0; }
+
+        /* ============ BUTTONS ============ */
+        button, .button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            border: 1px solid transparent;
+            background: var(--text);
+            color: white;
+            padding: 0.7rem 1.15rem;
+            border-radius: var(--radius-pill);
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            box-shadow: var(--shadow-xs);
+            text-decoration: none;
+            line-height: 1.2;
+        }
+        button:hover, .button:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-sm);
+        }
+        button:active, .button:active { transform: translateY(0); }
+        button:focus-visible, .button:focus-visible {
+            outline: none;
+            box-shadow: var(--shadow-focus);
+        }
+        button:disabled, .button:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .button.secondary, button.secondary {
+            background: var(--surface);
+            color: var(--text);
+            border-color: var(--border);
+        }
+        .button.secondary:hover, button.secondary:hover {
+            background: var(--accent-soft);
+            color: var(--accent-hover);
+            border-color: var(--accent-ring);
+        }
+
+        .button.ghost {
             background: transparent;
-            accent-color: var(--accent);
+            color: var(--text-soft);
+            border-color: transparent;
+            box-shadow: none;
+        }
+        .button.ghost:hover {
+            background: var(--surface);
+            color: var(--text);
         }
 
+        .button.danger {
+            background: var(--danger);
+            color: white;
+        }
+        .button.danger:hover { background: #991b1b; }
+
+        .button.sm { padding: 0.45rem 0.8rem; font-size: 0.825rem; }
+        .button.lg { padding: 0.85rem 1.4rem; font-size: 0.95rem; }
+        .button.block { width: 100%; }
+
+        /* ============ GRID ============ */
+        .grid { display: grid; gap: 1rem; }
+        .grid-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+        .grid-3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+        .grid-4 { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+
+        /* ============ METRICS ============ */
+        .metric {
+            position: relative;
+            border-radius: var(--radius-lg);
+            padding: 1.1rem 1.2rem;
+            background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+        .metric > * { position: relative; z-index: 1; }
+        .metric .label {
+            display: block;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .metric strong {
+            display: block;
+            font-family: var(--font-display);
+            font-size: 2rem;
+            font-weight: 800;
+            margin-top: 0.35rem;
+            letter-spacing: -0.02em;
+            color: var(--text);
+            line-height: 1;
+        }
+
+        /* ============ FORMS ============ */
+        form { display: grid; gap: 1rem; }
+        .field { display: grid; gap: 0.4rem; }
+        label {
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: var(--text-soft);
+        }
+        input:not([type="checkbox"]):not([type="radio"]),
+        select, textarea {
+            width: 100%;
+            padding: 0.7rem 0.9rem;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text);
+            font-family: inherit;
+            font-size: 0.92rem;
+            line-height: 1.4;
+            transition: border-color var(--transition-fast), box-shadow var(--transition-fast),
+                        background var(--transition-fast);
+        }
+        input:hover, select:hover, textarea:hover { border-color: var(--border-strong); }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: var(--shadow-focus);
+            background: white;
+        }
+        input::placeholder { color: var(--muted-soft); }
+        input[type="checkbox"], input[type="radio"] {
+            width: auto;
+            accent-color: var(--accent);
+            cursor: pointer;
+        }
+
+        /* ============ TABLES ============ */
         table {
             width: 100%;
             border-collapse: separate;
             border-spacing: 0;
-            overflow: hidden;
         }
-
         th, td {
-            padding: 0.9rem 0.8rem;
+            padding: 0.85rem 0.9rem;
             vertical-align: top;
-            border-bottom: 1px solid rgba(47, 36, 27, 0.08);
-        }
-
-        .workload-table th,
-        .workload-table td {
-            padding: 0.65rem 0.7rem;
-        }
-
-        .workload-input {
-            max-width: 120px;
-        }
-
-        .class-selector {
-            margin-top: 0.35rem;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-            gap: 0.55rem;
-        }
-
-        .class-chip {
-            display: grid;
-            gap: 0.25rem;
-            padding: 0.75rem 0.8rem;
-            border-radius: 14px;
-            border: 1px solid var(--line);
-            background: rgba(255, 255, 255, 0.7);
-            cursor: pointer;
-            transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
-        }
-
-        .class-chip-row {
-            display: flex;
-            align-items: center;
-            gap: 0.45rem;
-        }
-
-        .chip-meta {
-            color: var(--muted);
-            font-size: 0.85rem;
-        }
-
-        .class-chip.is-selected {
-            border-color: rgba(15, 118, 110, 0.35);
-            background: rgba(15, 118, 110, 0.08);
-        }
-
-        .class-chip.is-active {
-            border-color: var(--accent);
-            box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.18);
-        }
-
-        .workload-hint {
-            margin-top: 0.45rem;
-        }
-
-        .workload-class-panel {
-            display: none;
-        }
-
-        .workload-class-panel.is-active {
-            display: block;
-        }
-
-        th {
             text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            font-size: 0.74rem;
+            font-weight: 700;
             color: var(--muted);
-            font-size: 0.92rem;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.06em;
+            background: var(--surface-2);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        tbody tr { transition: background var(--transition-fast); }
+        tbody tr:hover { background: var(--accent-soft); }
+        tbody tr:last-child td { border-bottom: none; }
+
+        .table-wrap {
+            overflow-x: auto;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            background: var(--surface);
+            -webkit-overflow-scrolling: touch;
         }
 
+        /* ============ LESSON CARDS ============ */
         .lesson-card {
             display: grid;
-            gap: 0.3rem;
-            padding: 0.8rem;
-            border-radius: 18px;
-            background: linear-gradient(160deg, rgba(15, 118, 110, 0.12), rgba(201, 139, 52, 0.12));
-            border: 1px solid rgba(15, 118, 110, 0.12);
+            gap: 0.25rem;
+            padding: 0.7rem 0.8rem;
+            border-radius: var(--radius-sm);
+            background: linear-gradient(155deg, rgba(15, 118, 110, 0.10) 0%, rgba(179, 121, 31, 0.08) 100%);
+            border: 1px solid rgba(15, 118, 110, 0.16);
+            color: var(--text);
+            transition: all var(--transition);
+            position: relative;
+            overflow: hidden;
         }
+        .lesson-card::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--accent);
+            opacity: 0.6;
+            transition: opacity var(--transition);
+        }
+        a.lesson-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            border-color: var(--accent);
+        }
+        a.lesson-card:hover::before { opacity: 1; }
+        .lesson-card strong {
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1.25;
+        }
+        .lesson-card span { font-size: 0.78rem; }
+        .lesson-card .lesson-teacher { color: var(--text-soft); }
+        .lesson-card .lesson-room { color: var(--muted); }
+        .lesson-card .lesson-class { color: var(--muted); }
 
+        /* ============ BADGES ============ */
         .badge {
             display: inline-flex;
             align-items: center;
-            justify-content: center;
-            padding: 0.28rem 0.65rem;
-            border-radius: 999px;
-            font-size: 0.8rem;
-            font-weight: 800;
-            background: rgba(15, 118, 110, 0.12);
-            color: var(--accent-dark);
+            gap: 0.3rem;
+            padding: 0.22rem 0.55rem;
+            border-radius: var(--radius-pill);
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            background: var(--accent-soft);
+            color: var(--accent-hover);
+            border: 1px solid transparent;
+            line-height: 1.2;
         }
+        .badge.locked { background: var(--gold-soft); color: var(--gold); }
+        .badge.success { background: var(--success-soft); color: var(--success); }
+        .badge.warning { background: var(--warning-soft); color: var(--warning); }
+        .badge.danger { background: var(--danger-soft); color: var(--danger); }
+        .badge svg { width: 11px; height: 11px; }
 
-        .badge.locked { background: rgba(201, 139, 52, 0.16); color: #8a5a14; }
-        .table-wrap { overflow-x: auto; }
-        .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        /* ============ EMPTY STATE ============ */
         .empty {
+            display: grid;
+            place-items: center;
+            min-height: 56px;
+            padding: 0.6rem;
+            color: var(--muted-soft);
+            border-radius: var(--radius-sm);
+            border: 1px dashed var(--border);
+            background: var(--surface-2);
+            font-size: 0.85rem;
+            text-align: center;
+            transition: all var(--transition-fast);
+        }
+        a.empty:hover {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+            color: var(--accent-hover);
+            border-style: solid;
+        }
+
+        /* ============ SECTION HEADER ============ */
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.1rem;
+        }
+        .section-head h2 { margin: 0; }
+        .section-head .section-sub {
+            margin: 0.25rem 0 0;
             color: var(--muted);
-            padding: 1rem;
-            border-radius: 18px;
-            border: 1px dashed rgba(47, 36, 27, 0.15);
-            background: rgba(255,255,255,0.5);
+            font-size: 0.88rem;
         }
 
-        .progress-banner,
-        .progress-page {
-            margin-bottom: 1rem;
+        /* ============ TAG / EYEBROW ============ */
+        .eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.3rem 0.7rem;
+            background: var(--accent-soft);
+            color: var(--accent-hover);
+            border-radius: var(--radius-pill);
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 0.6rem;
+        }
+        .eyebrow svg { width: 12px; height: 12px; }
+
+        /* ============ ACTIONS ============ */
+        .actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            align-items: center;
         }
 
+        /* ============ PROGRESS ============ */
+        .progress-banner, .progress-page { margin-bottom: 1rem; }
         .progress-header {
             display: flex;
             justify-content: space-between;
@@ -274,80 +654,235 @@
             gap: 1rem;
             flex-wrap: wrap;
         }
-
         .progress-track {
             width: 100%;
-            height: 12px;
-            border-radius: 999px;
-            background: rgba(47, 36, 27, 0.08);
+            height: 10px;
+            border-radius: var(--radius-pill);
+            background: var(--border);
             overflow: hidden;
             margin-top: 0.9rem;
+            position: relative;
         }
-
-        .progress-track-large {
-            height: 16px;
-            margin-top: 1.1rem;
-        }
-
+        .progress-track-large { height: 14px; margin-top: 1.1rem; }
         .progress-fill {
             height: 100%;
-            border-radius: 999px;
+            border-radius: inherit;
             background: linear-gradient(90deg, var(--accent), var(--gold));
-            transition: width 0.35s ease;
+            transition: width 0.45s var(--ease-out);
+            position: relative;
+            overflow: hidden;
         }
-
+        .progress-fill::after {
+            content: "";
+            position: absolute; inset: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent);
+            animation: shimmer 1.8s ease-in-out infinite;
+        }
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
         .progress-meta {
             display: flex;
             flex-wrap: wrap;
             gap: 0.8rem;
             margin-top: 0.75rem;
             align-items: center;
+            font-size: 0.85rem;
         }
 
-        .timeline {
+        /* ============ WORKLOAD CHIPS ============ */
+        .workload-table th, .workload-table td { padding: 0.6rem 0.7rem; }
+        .workload-input { max-width: 120px; }
+        .class-selector {
+            margin-top: 0.4rem;
             display: grid;
-            gap: 0.75rem;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 0.55rem;
         }
+        .class-chip {
+            display: grid;
+            gap: 0.25rem;
+            padding: 0.75rem 0.85rem;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            background: var(--surface);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+        .class-chip:hover {
+            border-color: var(--accent-ring);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-sm);
+        }
+        .class-chip-row { display: flex; align-items: center; gap: 0.45rem; }
+        .chip-meta { color: var(--muted); font-size: 0.82rem; }
+        .class-chip.is-selected {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+        }
+        .class-chip.is-active {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-ring);
+        }
+        .workload-hint { margin-top: 0.45rem; }
+        .workload-class-panel { display: none; }
+        .workload-class-panel.is-active { display: block; }
 
+        /* ============ TIMELINE ============ */
+        .timeline { display: grid; gap: 0.65rem; }
         .timeline-item {
             display: grid;
             gap: 0.15rem;
-            padding: 0.9rem 1rem;
-            border-radius: 18px;
-            border: 1px solid rgba(47, 36, 27, 0.08);
-            background: rgba(255, 255, 255, 0.72);
+            padding: 0.85rem 1rem;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border);
+            background: var(--surface);
         }
 
-        @media (max-width: 720px) {
-            .topbar { flex-direction: column; align-items: stretch; }
-            .nav { width: 100%; }
-            .nav a { text-align: center; flex: 1; }
+        /* ============ RESPONSIVE ============ */
+        @media (max-width: 860px) {
+            .topbar {
+                flex-direction: column;
+                align-items: stretch;
+                top: 0.5rem;
+                padding: 0.85rem;
+            }
+            .brand { justify-content: center; text-align: center; }
+            .brand-text { text-align: left; }
+            .nav { width: 100%; justify-content: center; }
+            .nav-divider { display: none; }
+            .user-chip .username-text { display: none; }
+        }
+
+        @media (max-width: 540px) {
+            body { font-size: 14px; }
+            .shell { padding: 0.6rem 0 2rem; }
+            .panel, .card { padding: 1.1rem; border-radius: var(--radius-lg); }
+            .metric strong { font-size: 1.6rem; }
+            .nav-link { padding: 0.5rem 0.7rem; font-size: 0.82rem; }
+            .nav-link .nav-label { display: none; }
+            .nav-link svg { opacity: 1; }
+            .button.lg { padding: 0.75rem 1.1rem; font-size: 0.9rem; }
+        }
+
+        /* ============ A11Y ============ */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+            html { scroll-behavior: auto; }
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px; height: 1px;
+            padding: 0; margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        /* Page enter animation */
+        main { animation: fadeUp 380ms var(--ease-out); }
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
     </style>
+    {% block extra_head %}{% endblock %}
 </head>
 <body>
 <div class="shell">
-    <div class="topbar">
-        <div class="brand">
-            <h1>Школьное расписание</h1>
-            <p>Автоматическое составление расписания с ручной корректировкой для школы.</p>
-        </div>
-        <div class="nav">
-            <a href="{% url 'scheduler:dashboard' %}">Главная</a>
-            <a class="secondary" href="{% url 'scheduler:timetable' %}">Расписание</a>
-            <a class="secondary" href="/admin/">Админка</a>
-        </div>
-    </div>
+    <header class="topbar" role="banner">
+        <a href="{% url 'scheduler:timetable' %}" class="brand" aria-label="На главную">
+            <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="4" width="18" height="17" rx="3"/>
+                    <path d="M16 2v4M8 2v4M3 10h18"/>
+                    <path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/>
+                </svg>
+            </span>
+            <span class="brand-text">
+                <h1>Школьное расписание</h1>
+                <p>Умное составление и контроль уроков</p>
+            </span>
+        </a>
+
+        <nav class="nav" aria-label="Главное меню">
+            {% if user.is_authenticated %}
+                <a class="nav-link" href="{% url 'scheduler:dashboard' %}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12 12 3l9 9"/><path d="M5 10v10h14V10"/></svg>
+                    <span class="nav-label">Главная</span>
+                </a>
+                <a class="nav-link" href="{% url 'scheduler:timetable' %}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                    <span class="nav-label">Расписание</span>
+                </a>
+                {% if user.is_superuser or user.role == 'dispatcher' or user.role == 'admin' %}
+                    <a class="nav-link" href="{% url 'scheduler:schedule_conflicts' %}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>
+                        <span class="nav-label">Конфликты</span>
+                    </a>
+                {% endif %}
+                {% if user.is_superuser or user.role == 'admin' %}
+                    <a class="nav-link" href="/admin/">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                        <span class="nav-label">Админка</span>
+                    </a>
+                {% endif %}
+
+                <span class="nav-divider" aria-hidden="true"></span>
+
+                <span class="user-chip" title="{{ user.full_name|default:user.username }}">
+                    <span class="user-avatar" aria-hidden="true">{{ user.full_name|default:user.username|initials }}</span>
+                    <span class="username-text">{{ user.full_name|default:user.username }}</span>
+                    <span class="role-tag">
+                        {% if user.is_superuser %}superuser
+                        {% elif user.role == 'admin' %}админ
+                        {% elif user.role == 'dispatcher' %}диспетчер
+                        {% elif user.role == 'teacher' %}учитель
+                        {% elif user.role == 'student' %}ученик
+                        {% endif %}
+                    </span>
+                </span>
+
+                <form method="post" action="{% url 'scheduler:logout' %}" class="logout-form">
+                    {% csrf_token %}
+                    <button type="submit" class="logout-btn" aria-label="Выйти из системы">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                        <span>Выйти</span>
+                    </button>
+                </form>
+            {% else %}
+                <a class="nav-link" href="{% url 'scheduler:timetable' %}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                    <span class="nav-label">Расписание</span>
+                </a>
+                <a class="nav-link is-primary" href="{% url 'scheduler:login' %}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                    <span class="nav-label">Войти</span>
+                </a>
+            {% endif %}
+        </nav>
+    </header>
 
     {% if messages %}
-        <div class="messages">
+        <div class="messages" role="status" aria-live="polite">
             {% for message in messages %}
-                <div class="message {{ message.tags }}">{{ message }}</div>
+                <div class="message {{ message.tags }}">
+                    <span>{{ message }}</span>
+                </div>
             {% endfor %}
         </div>
     {% endif %}
 
-    {% block content %}{% endblock %}
+    <main>
+        {% block content %}{% endblock %}
+    </main>
 </div>
 </body>
 </html>

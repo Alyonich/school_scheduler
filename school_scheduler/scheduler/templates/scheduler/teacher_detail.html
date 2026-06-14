@@ -69,16 +69,23 @@
                 После сохранения статус дня станет единым для всех уроков этого дня только на выбранной неделе.
             </div>
         {% endif %}
-        <form method="post" action="?week_start={{ week_start|date:'Y-m-d' }}">
-            {% csrf_token %}
-            {% for field in availability_form %}
-                <div class="field">
-                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                    {{ field }}
-                </div>
-            {% endfor %}
-            <button type="submit">Сохранить доступность на эту неделю</button>
-        </form>
+        {% if can_edit_availability %}
+            <form method="post" action="?week_start={{ week_start|date:'Y-m-d' }}">
+                {% csrf_token %}
+                {% for field in availability_form %}
+                    <div class="field">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                    </div>
+                {% endfor %}
+                <button type="submit">Сохранить доступность на эту неделю</button>
+            </form>
+        {% else %}
+            <div class="message info">
+                Изменять доступность может только сам преподаватель, диспетчер или администратор.
+                Просмотр текущих статусов доступен ниже.
+            </div>
+        {% endif %}
     </section>
 
     <section class="panel">

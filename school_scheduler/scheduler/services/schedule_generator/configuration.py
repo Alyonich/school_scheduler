@@ -45,15 +45,22 @@ class GASettings:
 class WeightSettings:
     weekly_load_penalty: float = 10.0
     daily_unevenness_penalty: float = 8.0
-    teacher_gap_penalty: float = 5.0
-    class_gap_penalty: float = 5.0
+    teacher_gap_penalty: float = 60.0
+    class_gap_penalty: float = 200.0
     teacher_preference_penalty: float = 6.0
     hard_subject_position_penalty: float = 7.0
     doubled_subject_penalty: float = 8.0
     sanpin_score_penalty: float = 15.0
     peak_day_penalty: float = 6.0
-    class_window_penalty: float = 6.0
-    teacher_window_penalty: float = 5.0
+    class_window_penalty: float = 200.0
+    teacher_window_penalty: float = 60.0
+    # Штраф за «тяжёлый» предмет на 4-м уроке и позже. Множитель уже учитывает
+    # номер класса в fitness.py — для 9/11 коэффициент в 5 раз сильнее,
+    # для 5-8 — в 1 раз; здесь общий весовой множитель.
+    hard_subject_late_position_penalty: float = 25.0
+    # Бонус (отрицательный штраф) за тяжёлый предмет в первых трёх уроках
+    # у 9 и 11 классов — двигает GA к «правильной» расстановке.
+    hard_subject_early_bonus: float = 12.0
 
 
 @dataclass(frozen=True)
@@ -128,15 +135,17 @@ def load_scheduler_settings(config_path: str | Path | None = None) -> SchedulerS
             weights=WeightSettings(
                 weekly_load_penalty=float(weight_payload.get('weekly_load_penalty', 10.0)),
                 daily_unevenness_penalty=float(weight_payload.get('daily_unevenness_penalty', 8.0)),
-                teacher_gap_penalty=float(weight_payload.get('teacher_gap_penalty', 5.0)),
-                class_gap_penalty=float(weight_payload.get('class_gap_penalty', 5.0)),
+                teacher_gap_penalty=float(weight_payload.get('teacher_gap_penalty', 60.0)),
+                class_gap_penalty=float(weight_payload.get('class_gap_penalty', 200.0)),
                 teacher_preference_penalty=float(weight_payload.get('teacher_preference_penalty', 6.0)),
                 hard_subject_position_penalty=float(weight_payload.get('hard_subject_position_penalty', 7.0)),
                 doubled_subject_penalty=float(weight_payload.get('doubled_subject_penalty', 8.0)),
                 sanpin_score_penalty=float(weight_payload.get('sanpin_score_penalty', 15.0)),
                 peak_day_penalty=float(weight_payload.get('peak_day_penalty', 6.0)),
-                class_window_penalty=float(weight_payload.get('class_window_penalty', 6.0)),
-                teacher_window_penalty=float(weight_payload.get('teacher_window_penalty', 5.0)),
+                class_window_penalty=float(weight_payload.get('class_window_penalty', 200.0)),
+                teacher_window_penalty=float(weight_payload.get('teacher_window_penalty', 60.0)),
+                hard_subject_late_position_penalty=float(weight_payload.get('hard_subject_late_position_penalty', 25.0)),
+                hard_subject_early_bonus=float(weight_payload.get('hard_subject_early_bonus', 12.0)),
             ),
         ),
         school=SchoolSettings(

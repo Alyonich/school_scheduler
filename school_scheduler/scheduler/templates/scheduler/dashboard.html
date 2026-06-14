@@ -1,78 +1,169 @@
 {% extends "scheduler/base.html" %}
+{% load scheduler_extras %}
 
 {% block title %}Главная · Школьное расписание{% endblock %}
+
+{% block extra_head %}
+<style>
+    .welcome-hero {
+        padding: 1.8rem 2rem;
+        border-radius: var(--radius-xl);
+        background: linear-gradient(135deg, rgba(15, 118, 110, 0.10), rgba(179, 121, 31, 0.06));
+        border: 1px solid rgba(15, 118, 110, 0.20);
+        margin-bottom: 1.3rem;
+        position: relative;
+        overflow: hidden;
+    }
+    .welcome-hero::after {
+        content: "";
+        position: absolute;
+        right: -80px; bottom: -80px;
+        width: 280px; height: 280px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(15, 118, 110, 0.14), transparent 70%);
+        pointer-events: none;
+    }
+    .welcome-hero h1 {
+        font-size: clamp(1.5rem, 2.5vw, 1.9rem);
+        margin: 0;
+        position: relative;
+    }
+    .welcome-hero p {
+        margin: 0.4rem 0 0;
+        color: var(--text-soft);
+        font-size: 0.95rem;
+        max-width: 56ch;
+        position: relative;
+    }
+
+    .teacher-row {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+    }
+    .teacher-row .avatar {
+        width: 36px; height: 36px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, var(--accent), var(--gold));
+        color: white;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--font-display);
+        font-weight: 700;
+        font-size: 0.72rem;
+        letter-spacing: 0.02em;
+        line-height: 1;
+        flex-shrink: 0;
+        overflow: hidden;
+        text-transform: uppercase;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 1px 2px rgba(28, 22, 14, 0.08);
+    }
+    .teacher-name {
+        font-weight: 700;
+        color: var(--text);
+    }
+    .num-cell {
+        font-family: var(--font-mono);
+        font-weight: 600;
+        font-size: 0.92rem;
+        color: var(--text-soft);
+    }
+</style>
+{% endblock %}
 
 {% block content %}
 {% include "scheduler/_generation_active_banner.html" with job=active_generation_job %}
 
-<section class="panel">
-    <h2>Обзор проекта</h2>
-    <p class="muted">Краткая сводка по текущему состоянию расписания и тестовым школьным данным.</p>
-    <div class="grid grid-2">
+<div class="welcome-hero">
+    <h1>Добро пожаловать, {{ user.full_name|default:user.username }}</h1>
+</div>
+
+<section class="panel" aria-labelledby="overview-heading">
+    <span class="eyebrow">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 4 4 5-6"/></svg>
+        Обзор
+    </span>
+    <h2 id="overview-heading" style="margin-bottom: 1.1rem;">Сводка по школе</h2>
+    <div class="grid grid-4">
         <div class="metric">
-            <span class="muted">Классы</span>
+            <span class="label">Классы</span>
             <strong>{{ summary.classes }}</strong>
         </div>
         <div class="metric">
-            <span class="muted">Преподаватели</span>
+            <span class="label">Преподаватели</span>
             <strong>{{ summary.teachers }}</strong>
         </div>
         <div class="metric">
-            <span class="muted">Занятия на этой неделе</span>
+            <span class="label">Занятий на неделе</span>
             <strong>{{ summary.lessons_this_week }}</strong>
         </div>
         <div class="metric">
-            <span class="muted">Закреплённые занятия</span>
+            <span class="label">Закреплено</span>
             <strong>{{ summary.locked_lessons }}</strong>
         </div>
     </div>
 </section>
 
 <div class="grid grid-2" style="margin-top: 1rem;">
-    <section class="panel">
-        <h2>Открыть расписание</h2>
-        <p class="muted">Перейдите в недельный редактор и просмотрите расписание класса или преподавателя.</p>
-        <form method="get" action="{% url 'scheduler:timetable' %}">
+    <section class="panel" aria-labelledby="open-tt-heading">
+        <span class="eyebrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            Расписание
+        </span>
+        <h2 id="open-tt-heading">Открыть расписание</h2>
+        <form method="get" action="{% url 'scheduler:timetable' %}#schedule-grid" style="margin-top: 1rem;">
             {% for field in filter_form %}
                 <div class="field">
                     <label for="{{ field.id_for_label }}">{{ field.label }}</label>
                     {{ field }}
                 </div>
             {% endfor %}
-            <button type="submit">Открыть недельное расписание</button>
+            <button type="submit">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+                Открыть недельное расписание
+            </button>
         </form>
     </section>
 
-    <section class="panel">
-        <h2>Самые загруженные преподаватели</h2>
-        <p class="muted">Показатели: за выбранную неделю, за текущий месяц этой недели и за всё время.</p>
+    <section class="panel" aria-labelledby="busy-heading">
+        <span class="eyebrow">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v6M12 22v-2M4.93 4.93l4.24 4.24M14.83 14.83l4.24 4.24M2 12h6M22 12h-2M4.93 19.07l4.24-4.24M14.83 9.17l4.24-4.24"/></svg>
+            Нагрузка
+        </span>
+        <h2 id="busy-heading">Самые загруженные преподаватели</h2>
         {% if busiest_teachers %}
-            <table>
-                <thead>
-                    <tr>
-                        <th>Преподаватель</th>
-                        <th>За неделю</th>
-                        <th>За месяц</th>
-                        <th>За всё время</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for teacher in busiest_teachers %}
+            <div class="table-wrap" style="margin-top: 1rem;">
+                <table>
+                    <thead>
                         <tr>
-                            <td>
-                                <a href="{% url 'scheduler:teacher_detail' teacher.pk %}" style="font-weight: 700; color: var(--accent-dark);">
-                                    {{ teacher }}
-                                </a>
-                            </td>
-                            <td>{{ teacher.lessons_week }}</td>
-                            <td>{{ teacher.lessons_month }}</td>
-                            <td>{{ teacher.total_lessons }}</td>
+                            <th>Преподаватель</th>
+                            <th style="text-align: right;">Неделя</th>
+                            <th style="text-align: right;">Месяц</th>
+                            <th style="text-align: right;">Всё время</th>
                         </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+                    </thead>
+                    <tbody>
+                        {% for teacher in busiest_teachers %}
+                            <tr>
+                                <td>
+                                    <a href="{% url 'scheduler:teacher_detail' teacher.pk %}" class="teacher-row">
+                                        <span class="avatar" aria-hidden="true">{{ teacher|initials }}</span>
+                                        <span class="teacher-name">{{ teacher }}</span>
+                                    </a>
+                                </td>
+                                <td class="num-cell" style="text-align: right;">{{ teacher.lessons_week }}</td>
+                                <td class="num-cell" style="text-align: right;">{{ teacher.lessons_month }}</td>
+                                <td class="num-cell" style="text-align: right;">{{ teacher.total_lessons }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         {% else %}
-            <div class="empty">Занятий пока нет. Откройте недельный редактор и запустите пересчёт расписания там, когда будете готовы.</div>
+            <div class="empty" style="margin-top: 1rem; min-height: 80px;">
+                Занятий пока нет. Откройте недельный редактор и запустите пересчёт расписания там, когда будете готовы.
+            </div>
         {% endif %}
     </section>
 </div>

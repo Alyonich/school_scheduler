@@ -4,18 +4,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, time, timedelta
 
-from scheduler.models import (
-    Class,
-    Classroom,
-    ClassSubject,
-    Schedule,
-    TeachingAssignment,
-    TimeSlot,
-    WeeklyClassSubjectLoad,
-    teacher_unavailability_pairs_for_week,
-)
+# Импорты scheduler.models перенесены внутрь load_generation_context,
+# чтобы модуль можно было использовать в standalone-тестах без django.setup().
 from .configuration import SchedulerSettings, load_scheduler_settings
-from .input_models import SchoolInputModel
 from .sanpin_validator import SanPinValidator, TimeGridEntry, is_hard_subject, is_pe_subject
 from .school_rules import alternation_group, allows_double_lesson
 
@@ -117,6 +108,20 @@ def load_generation_context(
     class_ids: list[int] | None = None,
     settings: SchedulerSettings | None = None,
 ) -> GenerationContext:
+    # Импорты Django-моделей и pydantic-валидатора локализованы здесь —
+    # это даёт возможность импортировать модуль без django.setup().
+    from scheduler.models import (
+        Class,
+        Classroom,
+        ClassSubject,
+        Schedule,
+        TeachingAssignment,
+        TimeSlot,
+        WeeklyClassSubjectLoad,
+        teacher_unavailability_pairs_for_week,
+    )
+    from .input_models import SchoolInputModel
+
     settings = settings or load_scheduler_settings()
     sanpin_validator = SanPinValidator(settings.school, settings.sanpin)
     weekday_numbers = tuple(settings.school.weekdays)
@@ -546,6 +551,8 @@ def _validate_school_input_with_pydantic(
     assignments: list[TeachingAssignment],
     classrooms: dict[int, ClassroomData],
 ) -> None:
+    from .input_models import SchoolInputModel
+
     hours_by_class: dict[int, dict[str, int]] = defaultdict(dict)
     for class_subject in class_subjects:
         hours_by_class[class_subject.class_obj_id][class_subject.subject.name] = class_subject.weekly_hours

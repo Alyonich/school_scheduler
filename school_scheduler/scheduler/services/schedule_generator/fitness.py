@@ -138,6 +138,28 @@ def evaluate_chromosome(chromosome: Chromosome, context: GenerationContext) -> C
         if difficulty_score >= 8 and slot.lesson_number in {1, last_lesson_by_weekday.get(slot.weekday, max_lesson_number)}:
             diagnostics['hard_subject_position_violations'] += 1
 
+        # Дополнительный штраф: тяжёлый предмет ПОЗДНЕЕ 3-го урока штрафуется
+        # тем сильнее, чем выше класс. Особый коэффициент для 9 и 11 классов —
+        # там профильная нагрузка по математике/русскому требует ставить
+        # сложное в начало дня.
+        if difficulty_score >= 8 and slot.lesson_number > 3:
+            late_excess = slot.lesson_number - 3
+            if class_grade in {9, 11}:
+                grade_weight = 5
+            elif class_grade >= 9:
+                grade_weight = 3
+            elif class_grade >= 5:
+                grade_weight = 1
+            else:
+                grade_weight = 0
+            diagnostics['hard_subject_late_position'] += late_excess * grade_weight
+
+        # Поощрение размещения тяжёлого предмета на первых трёх уроках 9/11 классов:
+        # отдельный диагностический ключ растёт только при ПРАВИЛЬНОМ размещении и
+        # будет вычитаться из soft_penalty (см. ниже).
+        if difficulty_score >= 8 and slot.lesson_number <= 3 and class_grade in {9, 11}:
+            diagnostics['hard_subject_early_bonus_grade_9_11'] += 1
+
     for fixed in context.fixed_lessons:
         room = context.classrooms[fixed.classroom_id]
         register_lesson(
@@ -237,6 +259,8 @@ def evaluate_chromosome(chromosome: Chromosome, context: GenerationContext) -> C
     soft_penalty += diagnostics.get('class_gap', 0) * weights.class_gap_penalty
     soft_penalty += diagnostics.get('teacher_preference_violations', 0) * weights.teacher_preference_penalty
     soft_penalty += diagnostics.get('hard_subject_position_violations', 0) * weights.hard_subject_position_penalty
+    soft_penalty += diagnostics.get('hard_subject_late_position', 0) * weights.hard_subject_late_position_penalty
+    soft_penalty -= diagnostics.get('hard_subject_early_bonus_grade_9_11', 0) * weights.hard_subject_early_bonus
     soft_penalty += (
         diagnostics.get('forbidden_double_lesson', 0) + diagnostics.get('subject_alternation', 0)
     ) * weights.doubled_subject_penalty
@@ -254,7 +278,9 @@ def evaluate_chromosome(chromosome: Chromosome, context: GenerationContext) -> C
     soft_penalty += diagnostics.get('teacher_late_start', 0) * (weights.teacher_gap_penalty / 2.0)
 
     chromosome.hard_penalty = int(round(hard_penalty))
-    chromosome.soft_penalty = int(round(soft_penalty))
+    # soft_penalty может уйти в минус из-за бонуса; не даём ему стать отрицательным,
+    # чтобы лексикографическое сравнение не теряло смысл.
+    chromosome.soft_penalty = max(0, int(round(soft_penalty)))
     chromosome.score = 100000 - chromosome.hard_penalty - chromosome.soft_penalty
     chromosome.diagnostics = dict(diagnostics)
     return chromosome

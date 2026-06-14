@@ -80,7 +80,7 @@ class GenerateEndpointTests(TestCase):
             reverse('scheduler:generate'),
             {
                 'week_start': self.week_start.isoformat(),
-                'generation_mode': 'balanced',
+                'time_limit_minutes': 0.5,
             },
         )
         self.assertEqual(response.status_code, 302)
@@ -94,7 +94,7 @@ class GenerateEndpointTests(TestCase):
                 reverse('scheduler:generate'),
                 {
                     'week_start': self.week_start.isoformat(),
-                    'generation_mode': 'balanced',
+                    'time_limit_minutes': 0.5,
                 },
             )
         self.assertEqual(response.status_code, 302)
@@ -105,7 +105,7 @@ class GenerateEndpointTests(TestCase):
             reverse('scheduler:generate'),
             {
                 'week_start': self.week_start.isoformat(),
-                'generation_mode': 'balanced',
+                'time_limit_minutes': 0.5,
                 f'load_{self.math_class_subject.id}': '1',
                 f'load_{self.english_class_subject.id}': '2',
             },
@@ -145,7 +145,7 @@ class GenerateEndpointTests(TestCase):
             reverse('scheduler:generate'),
             {
                 'week_start': self.week_start.isoformat(),
-                'generation_mode': 'balanced',
+                'time_limit_minutes': 0.5,
             },
         )
         self.assertEqual(response.status_code, 302)
@@ -163,7 +163,7 @@ class GenerateEndpointTests(TestCase):
             reverse('scheduler:generate'),
             {
                 'week_start': self.week_start.isoformat(),
-                'generation_mode': 'balanced',
+                'time_limit_minutes': 0.5,
             },
         )
         self.assertEqual(response.status_code, 302)

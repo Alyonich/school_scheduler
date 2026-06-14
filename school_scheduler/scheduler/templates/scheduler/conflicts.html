@@ -1,0 +1,61 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}Конфликты и окна · Школьное расписание{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <div class="actions" style="justify-content: space-between; align-items: center;">
+        <div>
+            <h2 style="margin: 0;">Конфликты и окна</h2>
+            <p class="muted" style="margin: 0.35rem 0 0;">
+                Неделя с {{ week_start|date:'d.m.Y' }}.
+                Здесь показаны классы, у которых есть окна между уроками или дни,
+                которые начинаются не с первого урока.
+            </p>
+        </div>
+        <div class="actions">
+            <a class="button secondary" href="{% url 'scheduler:timetable' %}?week_start={{ week_start|date:'Y-m-d' }}">К расписанию</a>
+            <a class="button secondary" href="{% url 'scheduler:dashboard' %}">На главную</a>
+        </div>
+    </div>
+</section>
+
+{% if not has_problems %}
+    <section class="panel" style="margin-top: 1rem;">
+        <div class="empty">
+            На этой неделе нет классов с окнами или поздним стартом дня. Всё в порядке.
+        </div>
+    </section>
+{% else %}
+    <section class="panel" style="margin-top: 1rem;">
+        <div class="conflicts-list">
+            {% for row in report_rows %}
+                <article class="conflict-class" style="border:1px solid var(--border-soft,#ddd); border-radius:8px; padding:0.9rem 1.1rem; margin-bottom:0.75rem;">
+                    <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.4rem;">
+                        <strong>Класс {{ row.class_obj.name }}</strong>
+                        <span class="muted">{{ row.problem_days|length }} проблемных дн.</span>
+                    </header>
+                    <ul style="list-style:none; padding:0; margin:0;">
+                        {% for day in row.problem_days %}
+                            <li style="padding:0.35rem 0; border-top:1px dashed var(--border-soft,#eee); display:flex; justify-content:space-between; gap:1rem; align-items:center; flex-wrap:wrap;">
+                                <div>
+                                    <a href="{% url 'scheduler:conflict_day_view' row.class_obj.id day.date|date:'Y-m-d' %}"><strong>{{ day.weekday_label }}, {{ day.date|date:'d.m' }}</strong></a>
+                                    <span class="muted"> — уроки: {{ day.lesson_numbers|join:", " }}</span>
+                                </div>
+                                <div class="actions" style="gap:0.35rem;">
+                                    {% if day.has_gap %}
+                                        <span class="badge warning">Окна: {{ day.gap_numbers|join:", " }}</span>
+                                    {% endif %}
+                                    {% if day.has_late_start %}
+                                        <span class="badge warning">Старт с {{ day.first_lesson_number }} урока</span>
+                                    {% endif %}
+                                </div>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+{% endif %}
+{% endblock %}

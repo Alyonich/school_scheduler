@@ -15,15 +15,17 @@ algorithm:
   weights:
     weekly_load_penalty: 10.0
     daily_unevenness_penalty: 8.0
-    teacher_gap_penalty: 5.0
-    class_gap_penalty: 5.0
+    teacher_gap_penalty: 60.0
+    class_gap_penalty: 200.0
     teacher_preference_penalty: 6.0
     hard_subject_position_penalty: 7.0
     doubled_subject_penalty: 8.0
     sanpin_score_penalty: 15.0
     peak_day_penalty: 6.0
-    class_window_penalty: 6.0
-    teacher_window_penalty: 5.0
+    class_window_penalty: 200.0
+    teacher_window_penalty: 60.0
+    hard_subject_late_position_penalty: 25.0
+    hard_subject_early_bonus: 12.0
 
 school:
   name: "МБОУ СОШ №1"

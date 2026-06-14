@@ -1,0 +1,59 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging/build output
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Django/local runtime
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+.generation.lock
+.generation.run.lock
+.generation.lockdir/
+.tmp/
+staticfiles/
+media/
+
+# Local config/secrets
+.env
+.env.*
+*.local
+local_settings.py
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# AI assistant local/generated files
+.codex/
+.claude/
+.agents/
+
+# Temporary/generated files
+_tmp*/
+.fuse_hidden*
+*.tmp
+*.bak
+*.log
+write_test.txt

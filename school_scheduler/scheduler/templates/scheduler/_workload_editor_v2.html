@@ -1,6 +1,6 @@
 <div class="field">
     <label>Классы для пересборки</label>
-    <div class="muted">Отметьте чекбоксами классы, для которых нужен пересчёт. Если ничего не выбрать, пересчёт будет для всех классов.</div>
+    <div class="muted">Отметьте чекбоксами классы, для которых нужен пересчёт.</div>
 
     {% if generation_form.classes.errors %}
         {% for error in generation_form.classes.errors %}
@@ -34,9 +34,6 @@
 
 {% if workload_classes %}
     <div class="field">
-        <label>Нагрузка по предметам выбранного класса</label>
-        <div class="muted">Изменения сохраняются при переключении между классами и применяются после нажатия кнопки пересчёта.</div>
-
         {% for class_item in workload_classes %}
             <div class="workload-class-panel" data-class-panel data-class-id="{{ class_item.class_id }}">
                 <div class="table-wrap">

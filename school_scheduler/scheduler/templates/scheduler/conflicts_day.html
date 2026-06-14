@@ -1,0 +1,165 @@
+{% extends "scheduler/base.html" %}
+
+{% block title %}{{ class_obj.name }} · {{ weekday_label }} · Конфликты и окна{% endblock %}
+
+{% block content %}
+<section class="panel">
+    <div class="actions" style="justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+        <div>
+            <h2 style="margin: 0;">{{ class_obj.name }} — {{ weekday_label }}, {{ lesson_date|date:'d.m.Y' }}</h2>
+            <p class="muted" style="margin: 0.35rem 0 0;">
+                Слева расписание класса на этот день, справа — что в это же время у учителей,
+                закреплённых за этим классом.
+                {% if has_gap %}<span class="badge warning" style="margin-left:0.4rem;">Найдены окна</span>{% endif %}
+                {% if has_late_start %}<span class="badge warning" style="margin-left:0.4rem;">Поздний старт</span>{% endif %}
+            </p>
+        </div>
+        <div class="actions">
+            <a class="button secondary" href="{% url 'scheduler:schedule_conflicts' %}?week_start={{ week_start|date:'Y-m-d' }}">← К списку конфликтов</a>
+        </div>
+    </div>
+
+    <form method="post" class="actions" style="margin-top: 0.9rem; gap: 0.6rem; flex-wrap: wrap;">
+        {% csrf_token %}
+        <button type="submit" name="action" value="generate_substitution_preview" class="button">
+            Сгенерировать на день без окон (с заменами)
+        </button>
+        {% if substitution_preview %}
+            <button type="submit" name="action" value="apply_substitution_preview" class="button" style="background:#0f8b4c;">
+                Сохранить замену на этот день
+            </button>
+            <button type="submit" name="action" value="discard_substitution_preview" class="button secondary">
+                Не сохранять
+            </button>
+            <span class="muted">Сейчас это только предпросмотр, в базу ещё не записано.</span>
+        {% endif %}
+    </form>
+</section>
+
+{% if substitution_preview %}
+    <section class="panel" style="margin-top: 1rem; border: 1px solid #c9e9d5;">
+        <h2 style="margin: 0 0 0.55rem;">Предпросмотр замены на день (ещё не сохранено)</h2>
+        <p class="muted" style="margin: 0 0 0.8rem;">
+            Уроков: {{ substitution_preview.summary.lessons_total }}.
+            Замен учителя: {{ substitution_preview.summary.teacher_substitutions }}.
+            Временных внешних замен (учитель не закреплён за этим классом): {{ substitution_preview.summary.external_substitutions }}.
+            {% if preview_has_gap %}<span class="badge warning" style="margin-left:0.4rem;">Есть окна</span>{% else %}<span class="badge success" style="margin-left:0.4rem;">Без окон</span>{% endif %}
+            {% if preview_has_late_start %}<span class="badge warning" style="margin-left:0.4rem;">Старт не с 1-го урока</span>{% else %}<span class="badge success" style="margin-left:0.4rem;">Старт с 1-го урока</span>{% endif %}
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Новый урок</th>
+                    <th>Предмет</th>
+                    <th>Учитель (было → станет)</th>
+                    <th>Кабинет (был → станет)</th>
+                    <th>Комментарий</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in preview_items %}
+                    <tr>
+                        <td><strong>#{{ item.new_lesson_number }}</strong></td>
+                        <td>{{ item.subject_name }}</td>
+                        <td>{{ item.old_teacher_name }} → <strong>{{ item.new_teacher_name }}</strong></td>
+                        <td>{{ item.old_classroom_name }} → <strong>{{ item.new_classroom_name }}</strong></td>
+                        <td>
+                            {% if item.is_external_substitution %}
+                                <span class="badge warning">Временная внешняя замена</span>
+                            {% elif item.is_teacher_substitution %}
+                                <span class="badge warning">Временная замена</span>
+                            {% else %}
+                                <span class="muted">Без замены учителя</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if preview_numbers %}
+            <p class="muted" style="margin-top: 0.65rem;">
+                Позиции в предпросмотре: {{ preview_numbers|join:", " }}.
+            </p>
+        {% endif %}
+    </section>
+{% endif %}
+
+<div class="grid grid-2" style="margin-top: 1rem; align-items: start;">
+    <section class="panel">
+        <h2 style="margin: 0 0 0.5rem;">Текущее расписание класса {{ class_obj.name }}</h2>
+        {% if class_day_lessons %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>№</th>
+                        <th>Время</th>
+                        <th>Предмет</th>
+                        <th>Учитель</th>
+                        <th>Кабинет</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for lesson in class_day_lessons %}
+                        <tr>
+                            <td><strong>#{{ lesson.time_slot.lesson_time.lesson_number }}</strong></td>
+                            <td><span class="muted">{{ lesson.time_slot.lesson_time.start_time|time:'H:i' }} – {{ lesson.time_slot.lesson_time.end_time|time:'H:i' }}</span></td>
+                            <td>{{ lesson.subject.name }}</td>
+                            <td>{{ lesson.teacher }}</td>
+                            <td>{{ lesson.classroom.name }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if has_gap or has_late_start %}
+                <p class="muted" style="margin-top: 0.6rem;">
+                    Заполненные позиции: {{ class_numbers|join:", " }}.
+                </p>
+            {% endif %}
+        {% else %}
+            <div class="empty">В этот день у класса нет занятий.</div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <h2 style="margin: 0 0 0.5rem;">Учителя класса {{ class_obj.name }} в этот день</h2>
+        {% if teacher_blocks %}
+            {% for block in teacher_blocks %}
+                <article style="border:1px solid var(--border-soft,#e5e5e5); border-radius:8px; padding:0.7rem 0.9rem; margin-bottom:0.7rem;">
+                    <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
+                        <strong>{{ block.teacher }}</strong>
+                        <span class="muted">{{ block.lessons|length }} занят.</span>
+                    </header>
+                    {% if block.lessons %}
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>№</th>
+                                    <th>Время</th>
+                                    <th>Класс</th>
+                                    <th>Предмет</th>
+                                    <th>Кабинет</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for lesson in block.lessons %}
+                                    <tr {% if lesson.class_obj_id == class_obj.id %}style="background:rgba(46,156,255,0.08);"{% endif %}>
+                                        <td><strong>#{{ lesson.time_slot.lesson_time.lesson_number }}</strong></td>
+                                        <td><span class="muted">{{ lesson.time_slot.lesson_time.start_time|time:'H:i' }} – {{ lesson.time_slot.lesson_time.end_time|time:'H:i' }}</span></td>
+                                        <td>{{ lesson.class_obj.name }}</td>
+                                        <td>{{ lesson.subject.name }}</td>
+                                        <td>{{ lesson.classroom.name }}</td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    {% else %}
+                        <div class="empty">В этот день у преподавателя нет занятий.</div>
+                    {% endif %}
+                </article>
+            {% endfor %}
+        {% else %}
+            <div class="empty">К этому классу не закреплено ни одного преподавателя.</div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}
